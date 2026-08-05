@@ -4,7 +4,7 @@
 ## 起動方法:  src/Fodpr
 ##
 ## 動作の流れ:
-##   1. リレーサーバー (ws://localhost:8000/ws) に接続
+##   1. リレーサーバー (ws://localhost:8000/) に接続
 ##   2. 鍵ペアを生成し、テストメッセージに署名して EVENT を投稿
 ##   3. REQ (購読要求) を送信
 ##   4. サーバーが返してくる保存済みイベント (PUSH) を受信して表示
@@ -49,7 +49,7 @@ proc main() {.async.} =
                 
         # content に対する署名は秘密鍵で生成し、公開鍵も同梱する。
         var sampleEvent = FodprEvent(
-            kind: 1,
+            kind: KindTextNote,
             createdAt: uint64(getTime().toUnix()),
             pubkey: kp.publicKey,
             tags: @["p:target_user_id", "e:parent_event_id"],

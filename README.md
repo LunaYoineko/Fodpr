@@ -2,7 +2,8 @@
 
 **Fully Open Decentralized Protocol**
 
-Fodpr は、WebSocket 上で動作する軽量なイベント配信プロトコルです。
+Fodpr は、Nostrを元にした完全に自由なオープンプロトコルです。
+WebSocket 上で動作する軽量なイベント配信プロトコルであり、
 クライアントは署名付きイベントをリレーサーバーへ投稿し、購読要求（REQ）によって
 条件に一致するイベントをリアルタイムに受信できます。
 
@@ -13,7 +14,9 @@ Fodpr は、WebSocket 上で動作する軽量なイベント配信プロトコ�
 - **署名付きイベント** — イベントは secp256k1 (ECDSA) で署名され、サーバーが改ざん・偽装を検証します
 - **シンプルなバイナリプロトコル** — 固定サイズ整数（ビッグエンディアン）+ 長さプレフィックス方式
 - **Bech32 エンコード** — 秘密鍵は `fsec1...`、公開鍵は `fpub1...` 形式でやり取り可能
-- **メモリ内ストレージ** — リレーサーバーは受信したイベントをメモリに保持して配信します（デモ実装）
+- **LMDB による永続ストレージ** — 受信したイベントはプロフィール（Kind 0）とタイムライン（Kind 1, 2 など）に分けて `./data/` に保存され、再起動後も保持されます
+- **イベント種別** — プロフィール（Kind 0）/ テキスト投稿（Kind 1）/ メディア（Kind 2）を標準で定義
+- **Docker 対応** — 付属の `Dockerfile` / `docker-compose.yml` でワンコマンド起動（LMDB データはボリュームに永続化）
 - **安全な終了** — サーバーは Ctrl+C (SIGINT) でリスニングソケットを閉じて正常終了します
 
 ## ディレクトリ構成
@@ -21,21 +24,26 @@ Fodpr は、WebSocket 上で動作する軽量なイベント配信プロトコ�
 ```
 Fodpr/
 ├── Fodpr.nimble        # Nimble パッケージ定義
-├── config.nims         # ビルド設定
-├── nimble.paths        # 依存ライブラリのパス設定
+├── Dockerfile          # リレーサーバー用の Docker イメージ定義
+├── docker-compose.yml  # Docker Compose での起動設定（ポート 8000 / データボリューム）
 ├── src/
 │   ├── Fodpr.nim       # クライアント（送信者）のデモ
 │   ├── server.nim      # リレーサーバー
 │   ├── protocol.nim    # ワイヤプロトコルのエンコード / デコード
 │   └── crypto.nim      # Bech32 と secp256k1（鍵生成・署名・検証）
-└── examples/
-    └── protocol_demo.nim  # protocol.nim を使ったサンプル
+├── examples/
+│   └── protocol_demo.nim  # protocol.nim を使ったサンプル
+├── LICENSES/           # サードパーティライブラリのライセンス情報
+├── README.en.md        # 英語版 README
+└── data/               # LMDB データベース（起動時に自動作成・gitignore）
 ```
 
 ## 必要環境
 
 - [Nim](https://nim-lang.org/) 2.2.10 以上
 - [Nimble](https://github.com/nim-lang/nimble)（依存ライブラリのインストールに使用）
+- ネイティブ実行時は LMDB のランタイムライブラリ（Debian/Ubuntu では `liblmdb0`）が必要
+- Docker で実行する場合は [Docker Engine](https://docs.docker.com/engine/) と [Docker Compose](https://docs.docker.com/compose/)
 
 ## ビルド方法
 
@@ -61,18 +69,29 @@ nim c src/Fodpr.nim
 
 ### 1. リレーサーバーを起動
 
+ネイティブで起動する場合:
+
 ```bash
 ./src/server
 ```
 
 ```
 ================================================
- Fodpr Relay Server running on ws://0.0.0.0:8000/ws
+ Fodpr Relay Server running on ws://0.0.0.0:8000/
  (Ctrl+C で安全に終了できます)
 ================================================
 ```
 
 終了するときは **Ctrl+C** を押します。リスニングソケットを閉じて正常終了します。
+
+Docker で起動する場合:
+
+```bash
+docker compose up -d --build
+```
+
+ビルド後、`http://localhost:8000/` へアクセスすると動作確認用の
+テキストが返ります。ログは `docker compose logs -f` で確認できます。
 
 ### 2. クライアントを起動
 
@@ -84,10 +103,10 @@ nim c src/Fodpr.nim
 
 クライアントは以下を行います:
 
-1. `ws://localhost:8000/ws` へ接続
-2. 鍵ペアを生成してテストイベントに署名し、EVENT として投稿
-3. サーバーが署名を検証して保存（応答: `OK: Event accepted`）
-4. REQ（購読要求）を送信
+1. `ws://localhost:8000/` へ接続
+2. 鍵ペアを生成し、プロフィール（Kind 0）を JSON 形式で EVENT として投稿（`OK: Event accepted`）
+3. テキスト投稿（Kind 1）とメディア（Kind 2）も続けて投稿
+4. REQ（購読要求）でメディア（Kind 2）を購読
 5. サーバーが保存済みイベントを PUSH 形式で返却
 6. 配信終了通知（`EOE: ...`）を受信して接続を閉じる
 
@@ -114,6 +133,16 @@ nim c -r examples/protocol_demo.nim
 
 数値はすべて **ビッグエンディアン** でエンコードされます。
 
+### イベント種別（kind）
+
+`protocol.nim` に定数として定義しています。
+
+| 定数          | 値 | 説明                                              |
+|--------------|----|---------------------------------------------------|
+| `KindMetaData` | 0  | プロフィール（メタデータ）。content は JSON で `name` / `about` などを指定 |
+| `KindTextNote` | 1  | テキスト投稿。content は UTF-8 の本文                |
+| `KindMedia`    | 2  | メディア。content にバイナリデータ（画像など）を格納  |
+
 ### EVENT のバイナリ形式
 
 ```
@@ -134,14 +163,28 @@ kind(2) | createdAt(8) | pubkey(33) | tagCount(2)
 MsgTypeReq(1) | subIdLen(2) | subId | kind(2) | tagKeyLen(2) | tagKey | tagValLen(2) | tagVal
 ```
 
-- `kind` が `0` の場合はすべての種別を購読
-- `tagKey` / `tagVal` でタグによる絞り込みが可能（空文字で指定なし）
+- `kind` が `0`（`KindMetaData`）の場合はプロフィールを購読
+- `kind` が `0` 以外の場合は、その種別に一致するタイムラインイベントを購読
+- `tagKey` / `tagVal` でタグによる絞り込みが可能（現在は `tagKey = "pubkey"` でプロフィールを絞り込み、空文字で指定なし）
 
 ### PUSH のバイナリ形式
 
 ```
 MsgTypePush(1) | subIdLen(2) | subId | EVENT 本体
 ```
+
+## ストレージ（server.nim）
+
+イベントは LMDB に永続化されます（`./data/` ディレクトリ、起動時に自動作成）。
+
+| DBI         | 保存するイベント                                  | キー                        |
+|-------------|--------------------------------------------------|-----------------------------|
+| `profiles`  | Kind 0（プロフィール）                            | 公開鍵（pubkey）            |
+| `events`    | Kind 1, 2 など（タイムライン）                    | 現在時刻 + Kind + 乱数      |
+
+- Kind 0 は公開鍵をキーにするため、同じ公開鍵で再投稿するとプロフィールが上書き更新されます
+- タイムラインイベントは追加ごとに一意なキーで保存されます
+- サーバー終了時（Ctrl+C）に環境をクローズし、データは再起動後も保持されます
 
 ## 暗号仕様（crypto.nim）
 

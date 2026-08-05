@@ -5,3 +5,6 @@
 nimble.develop
 nimbledeps
 /data
+/src/Fodpr
+/src/crypto
+/src/protocol

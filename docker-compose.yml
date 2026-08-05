@@ -1,0 +1,12 @@
+services:
+    fodpr:
+        build: .
+        container_name: fodpr
+        restart: always
+        ports:
+            - "8000:8000"
+        volumes:
+            - fodpr-data:/app/fodpr/data
+
+volumes:
+    fodpr-data:

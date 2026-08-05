@@ -1,0 +1,11 @@
+.git
+data
+bin
+nimble.paths
+nimble.develop
+nimbledeps
+Fodpr
+src/server
+src/Fodpr
+src/crypto
+src/protocol

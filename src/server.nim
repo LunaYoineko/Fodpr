@@ -51,7 +51,8 @@ proc initDatabase() =
   echo "[DB] LMDB ストレージの初期化が完了しました(./data)"
 
 # 各 HTTP リクエストを処理するコールバック。
-# URL が /ws のときだけ WebSocket として扱い、それ以外は 404 を返す。
+# URL が "/" (ルートパス) で WebSocket アップグレードヘッダがあるときだけ
+# WebSocket として扱い、それ以外は 404 を返す。
 proc cb(req: Request) {.async, gcsafe.} =
     let isWebSocket = (req.url.path == "/") and req.headers.hasKey("upgrade") and req.headers.getOrDefault("upgrade").toLowerAscii() == "websocket"
 
