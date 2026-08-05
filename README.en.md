@@ -13,36 +13,44 @@ real time by sending subscription requests (REQ).
 - **Signed events** — Every event is signed with secp256k1 (ECDSA); the relay verifies authenticity and rejects tampered events
 - **Simple binary protocol** — Fixed-size integers (big-endian) plus length-prefixed fields
 - **Bech32 encoding** — Private keys can be exchanged as `fsec1...` and public keys as `fpub1...`
-- **Persistent LMDB storage** — Received events are split into per-type DBs (JSON / String / Binary) under `./data/` and survive restarts
+- **Persistent LMDB storage** — Received events are split into per-type DBs (JSON / String / Binary) and survive restarts (a relay-server feature)
 - **Transmission types (TransType)** — Each user freely picks a transmission method from JSON / String / Binary. The server never interprets `content` semantics; it only stores and delivers based on the transmission type (all semantic interpretation such as profile management is the client's responsibility)
-- **Docker support** — A bundled `Dockerfile` / `docker-compose.yml` starts the relay in one command (LMDB data is persisted in a volume)
-- **Graceful shutdown** — Pressing Ctrl+C (SIGINT) closes the listening socket and shuts the server down cleanly
+- **Standalone relay server (FodprRelay)** — The relay server lives in the separate [FodprRelay](https://github.com/LunaYoineko/FodprRelay) repository (Docker support / graceful shutdown)
 
 ## Directory Layout
 
 ```
 Fodpr/
-├── Fodpr.nimble        # Nimble package definition
-├── Dockerfile          # Docker image definition for the relay server
-├── docker-compose.yml  # Docker Compose config (port 8000 / data volume)
+├── Fodpr.nimble        # Nimble package definition (Library type)
 ├── src/
-│   ├── Fodpr.nim       # Client (sender) demo
-│   ├── server.nim      # Relay server
+│   ├── Fodpr.nim       # Library main module (re-exports protocol / crypto)
 │   ├── protocol.nim    # Wire protocol encode / decode
 │   └── crypto.nim      # Bech32 and secp256k1 (keygen, signing, verification)
 ├── examples/
-│   └── protocol_demo.nim  # Sample using protocol.nim
+│   ├── fodpr_client.nim    # Sample client that talks to the relay server
+│   └── protocol_demo.nim   # Sample using protocol.nim (no server needed)
 ├── LICENSES/           # Third-party library license information
 ├── README.md           # 日本語版 README
-└── data/               # LMDB database (created at startup, git-ignored)
+└── data/               # LMDB database (used by the relay server, git-ignored)
+```
+
+The relay server (FodprRelay) is maintained in a separate repository:
+
+```
+FodprRelay/
+├── FodprRelay.nimble   # Nimble package definition (requires "https://github.com/LunaYoineko/Fodpr")
+├── Dockerfile          # Docker image definition for the relay server
+├── docker-compose.yml  # Docker Compose config (port 8000 / data volume)
+└── src/
+    └── server.nim      # Relay server
 ```
 
 ## Requirements
 
 - [Nim](https://nim-lang.org/) 2.2.10 or later
 - [Nimble](https://github.com/nim-lang/nimble) (used to install dependencies)
-- For native runs, the LMDB runtime library is required (on Debian/Ubuntu: `liblmdb0`)
-- For Docker, [Docker Engine](https://docs.docker.com/engine/) and [Docker Compose](https://docs.docker.com/compose/)
+- For a native relay server run, the LMDB runtime library is required (on Debian/Ubuntu: `liblmdb0`), see FodprRelay
+- For Docker relay runs, [Docker Engine](https://docs.docker.com/engine/) and [Docker Compose](https://docs.docker.com/compose/)
 
 ## Build
 
@@ -52,25 +60,29 @@ Install dependencies:
 nimble install -d
 ```
 
-Build the relay server:
+Run the sample client (while the relay server is up, in another terminal):
 
 ```bash
-nim c src/server.nim
+nim c -r examples/fodpr_client.nim
 ```
 
-Build the client (or use `nimble build`):
+Run the protocol encode / decode sample:
 
 ```bash
-nim c src/Fodpr.nim
+nim c -r examples/protocol_demo.nim
 ```
 
 ## Usage
 
-### 1. Start the relay server
+### 1. Start the relay server (FodprRelay)
 
-Run natively:
+The relay server lives in the separate [FodprRelay](https://github.com/LunaYoineko/FodprRelay)
+repository. Clone it and run:
 
 ```bash
+git clone https://github.com/LunaYoineko/FodprRelay
+cd FodprRelay
+nimble build -y
 ./src/server
 ```
 
@@ -86,6 +98,7 @@ Press **Ctrl+C** to shut the server down gracefully.
 Run with Docker:
 
 ```bash
+cd FodprRelay
 docker compose up -d --build
 ```
 
@@ -97,7 +110,7 @@ placeholder text for verification. Follow logs with `docker compose logs -f`.
 In another terminal:
 
 ```bash
-./src/Fodpr
+nim c -r examples/fodpr_client.nim
 ```
 
 The client performs the following:
@@ -179,9 +192,10 @@ MsgTypeReq(1) | subIdLen(2) | subId | transType(2) | tagKeyLen(2) | tagKey | tag
 MsgTypePush(1) | subIdLen(2) | subId | EVENT payload
 ```
 
-## Storage (server.nim)
+## Storage (server.nim in FodprRelay)
 
-Events are persisted in LMDB, split into per-type DBIs (in the `./data/` directory, created automatically at startup).
+The relay server (FodprRelay) persists events in LMDB, split into per-type DBIs
+(in the `./data/` directory, created automatically at startup).
 
 | DBI         | Stored events    | Key                    |
 |-------------|------------------|------------------------|

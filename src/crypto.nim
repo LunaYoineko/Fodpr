@@ -11,6 +11,7 @@
 ##   - nimcrypto : OS の乱数生成器 (sysrand) の利用
 
 import secp256k1, nimSHA2, strutils, nimcrypto
+export secp256k1
 
 # Bech32 で使用する 32 文字の文字集合 (BIP-173 準拠)。
 # 視認性が悪い "0", "1", "b", "i", "o" などを意図的に除外している。

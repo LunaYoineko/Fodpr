@@ -5,7 +5,6 @@ author        = "LunaYoineko"
 description   = "Fully Open Decentralized Protocol"
 license       = "MIT"
 srcDir        = "src"
-bin           = @["Fodpr"]
 
 
 # Dependencies
@@ -15,4 +14,3 @@ requires "ws"
 requires "secp256k1"
 requires "nimcrypto"
 requires "nimSHA2"
-requires "lmdb"

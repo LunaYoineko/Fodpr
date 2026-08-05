@@ -14,36 +14,44 @@ WebSocket 上で動作する軽量なイベント配信プロトコルであり�
 - **署名付きイベント** — イベントは secp256k1 (ECDSA) で署名され、サーバーが改ざん・偽装を検証します
 - **シンプルなバイナリプロトコル** — 固定サイズ整数（ビッグエンディアン）+ 長さプレフィックス方式
 - **Bech32 エンコード** — 秘密鍵は `fsec1...`、公開鍵は `fpub1...` 形式でやり取り可能
-- **LMDB による永続ストレージ** — 受信したイベントは送信タイプ（JSON / String / Binary）ごとの DBI に分けて `./data/` に保存され、再起動後も保持されます
+- **LMDB による永続ストレージ** — 受信したイベントは送信タイプ（JSON / String / Binary）ごとの DBI に分けて保存され、再起動後も保持されます（リレーサーバー側の機能）
 - **送信タイプ (TransType)** — 各ユーザーが JSON / String / Binary の 3 タイプから自由に送信方法を選べます。サーバーは content の意味を解釈せず、送信タイプに基づいて保存・配信するだけです（プロフィール管理などの意味解釈はすべてクライアント側の責務）
-- **Docker 対応** — 付属の `Dockerfile` / `docker-compose.yml` でワンコマンド起動（LMDB データはボリュームに永続化）
-- **安全な終了** — サーバーは Ctrl+C (SIGINT) でリスニングソケットを閉じて正常終了します
+- **独立したリレーサーバー (FodprRelay)** — リレーサーバーは別リポジトリ [FodprRelay](https://github.com/LunaYoineko/FodprRelay) として管理しています（Docker 対応・安全な終了対応）
 
 ## ディレクトリ構成
 
 ```
 Fodpr/
-├── Fodpr.nimble        # Nimble パッケージ定義
-├── Dockerfile          # リレーサーバー用の Docker イメージ定義
-├── docker-compose.yml  # Docker Compose での起動設定（ポート 8000 / データボリューム）
+├── Fodpr.nimble        # Nimble パッケージ定義（Library 型）
 ├── src/
-│   ├── Fodpr.nim       # クライアント（送信者）のデモ
-│   ├── server.nim      # リレーサーバー
+│   ├── Fodpr.nim       # ライブラリのメインモジュール（protocol / crypto を再エクスポート）
 │   ├── protocol.nim    # ワイヤプロトコルのエンコード / デコード
 │   └── crypto.nim      # Bech32 と secp256k1（鍵生成・署名・検証）
 ├── examples/
-│   └── protocol_demo.nim  # protocol.nim を使ったサンプル
+│   ├── fodpr_client.nim    # リレーサーバーと通信するクライアントのサンプル
+│   └── protocol_demo.nim   # protocol.nim を使ったサンプル（サーバー不要）
 ├── LICENSES/           # サードパーティライブラリのライセンス情報
 ├── README.en.md        # 英語版 README
-└── data/               # LMDB データベース（起動時に自動作成・gitignore）
+└── data/               # LMDB データベース（リレーサーバー側で使用・gitignore）
+```
+
+リレーサーバー (FodprRelay) は別リポジトリで管理しています。構成は以下:
+
+```
+FodprRelay/
+├── FodprRelay.nimble   # Nimble パッケージ定義（requires "https://github.com/LunaYoineko/Fodpr"）
+├── Dockerfile          # リレーサーバー用の Docker イメージ定義
+├── docker-compose.yml  # Docker Compose での起動設定（ポート 8000 / データボリューム）
+└── src/
+    └── server.nim      # リレーサーバー
 ```
 
 ## 必要環境
 
 - [Nim](https://nim-lang.org/) 2.2.10 以上
 - [Nimble](https://github.com/nim-lang/nimble)（依存ライブラリのインストールに使用）
-- ネイティブ実行時は LMDB のランタイムライブラリ（Debian/Ubuntu では `liblmdb0`）が必要
-- Docker で実行する場合は [Docker Engine](https://docs.docker.com/engine/) と [Docker Compose](https://docs.docker.com/compose/)
+- リレーサーバーをネイティブ実行する場合は、FodprRelay 側で LMDB のランタイムライブラリ（Debian/Ubuntu では `liblmdb0`）が必要
+- Docker でリレーサーバーを実行する場合は [Docker Engine](https://docs.docker.com/engine/) と [Docker Compose](https://docs.docker.com/compose/)
 
 ## ビルド方法
 
@@ -53,25 +61,29 @@ Fodpr/
 nimble install -d
 ```
 
-リレーサーバーのビルド:
+クライアントのサンプルを実行（リレーサーバー起動中に別ターミナルで）:
 
 ```bash
-nim c src/server.nim
+nim c -r examples/fodpr_client.nim
 ```
 
-クライアントのビルド（`nimble build` でも可）:
+プロトコルのエンコード / デコードだけを試すサンプル:
 
 ```bash
-nim c src/Fodpr.nim
+nim c -r examples/protocol_demo.nim
 ```
 
 ## 使い方
 
-### 1. リレーサーバーを起動
+### 1. リレーサーバーを起動（FodprRelay）
 
-ネイティブで起動する場合:
+リレーサーバーは別リポジトリ [FodprRelay](https://github.com/LunaYoineko/FodprRelay) にあります。
+`git clone` して実行してください:
 
 ```bash
+git clone https://github.com/LunaYoineko/FodprRelay
+cd FodprRelay
+nimble build -y
 ./src/server
 ```
 
@@ -87,6 +99,7 @@ nim c src/Fodpr.nim
 Docker で起動する場合:
 
 ```bash
+cd FodprRelay
 docker compose up -d --build
 ```
 
@@ -98,7 +111,7 @@ docker compose up -d --build
 別のターミナルで:
 
 ```bash
-./src/Fodpr
+nim c -r examples/fodpr_client.nim
 ```
 
 クライアントは以下を行います:
@@ -178,10 +191,10 @@ MsgTypeReq(1) | subIdLen(2) | subId | transType(2) | tagKeyLen(2) | tagKey | tag
 MsgTypePush(1) | subIdLen(2) | subId | EVENT 本体
 ```
 
-## ストレージ（server.nim）
+## ストレージ（FodprRelay の server.nim）
 
-イベントは送信タイプごとの DBI に分けて LMDB に永続化されます
-（`./data/` ディレクトリ、起動時に自動作成）。
+リレーサーバー (FodprRelay) は、イベントを送信タイプごとの DBI に分けて
+LMDB に永続化します（`./data/` ディレクトリ、起動時に自動作成）。
 
 | DBI         | 保存するイベント | キー                    |
 |-------------|------------------|-------------------------|

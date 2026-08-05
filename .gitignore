@@ -1,12 +1,10 @@
-/Fodpr
 /nimble.paths
 /config.nims
-/src/server
 nimble.develop
 nimbledeps
 /data
-/src/Fodpr
 /src/crypto
 /src/protocol
 /bin
 /examples/protocol_demo
+/examples/fodpr_client
