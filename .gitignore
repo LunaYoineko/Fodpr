@@ -8,3 +8,5 @@ nimbledeps
 /src/Fodpr
 /src/crypto
 /src/protocol
+/bin
+/examples/protocol_demo

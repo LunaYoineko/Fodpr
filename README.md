@@ -14,8 +14,8 @@ WebSocket 上で動作する軽量なイベント配信プロトコルであり�
 - **署名付きイベント** — イベントは secp256k1 (ECDSA) で署名され、サーバーが改ざん・偽装を検証します
 - **シンプルなバイナリプロトコル** — 固定サイズ整数（ビッグエンディアン）+ 長さプレフィックス方式
 - **Bech32 エンコード** — 秘密鍵は `fsec1...`、公開鍵は `fpub1...` 形式でやり取り可能
-- **LMDB による永続ストレージ** — 受信したイベントはプロフィール（Kind 0）とタイムライン（Kind 1, 2 など）に分けて `./data/` に保存され、再起動後も保持されます
-- **イベント種別** — プロフィール（Kind 0）/ テキスト投稿（Kind 1）/ メディア（Kind 2）を標準で定義
+- **LMDB による永続ストレージ** — 受信したイベントは送信タイプ（JSON / String / Binary）ごとの DBI に分けて `./data/` に保存され、再起動後も保持されます
+- **送信タイプ (TransType)** — 各ユーザーが JSON / String / Binary の 3 タイプから自由に送信方法を選べます。サーバーは content の意味を解釈せず、送信タイプに基づいて保存・配信するだけです（プロフィール管理などの意味解釈はすべてクライアント側の責務）
 - **Docker 対応** — 付属の `Dockerfile` / `docker-compose.yml` でワンコマンド起動（LMDB データはボリュームに永続化）
 - **安全な終了** — サーバーは Ctrl+C (SIGINT) でリスニングソケットを閉じて正常終了します
 
@@ -104,10 +104,10 @@ docker compose up -d --build
 クライアントは以下を行います:
 
 1. `ws://localhost:8000/` へ接続
-2. 鍵ペアを生成し、プロフィール（Kind 0）を JSON 形式で EVENT として投稿（`OK: Event accepted`）
-3. テキスト投稿（Kind 1）とメディア（Kind 2）も続けて投稿
-4. REQ（購読要求）でメディア（Kind 2）を購読
-5. サーバーが保存済みイベントを PUSH 形式で返却
+2. 鍵ペアを生成し、JSON・String・Binary の 3 タイプを EVENT として投稿（各 `OK: Event accepted`）
+3. REQ（購読要求, TransType: All）で全タイプを購読
+4. サーバーが保存済みイベントを PUSH 形式で返却
+5. クライアントは送信タイプごとに適した配信方法で表示（JSON はパースして整形 / String はそのまま / Binary はサイズのみ）
 6. 配信終了通知（`EOE: ...`）を受信して接続を閉じる
 
 ### 3. サンプルを実行（サーバー不要）
@@ -133,39 +133,44 @@ nim c -r examples/protocol_demo.nim
 
 数値はすべて **ビッグエンディアン** でエンコードされます。
 
-### イベント種別（kind）
+### 送信タイプ（TransType）と配信方法
 
-`protocol.nim` に定数として定義しています。
+`protocol.nim` に定数として定義しています。`transType` は「どのように送るか」を
+表す**送信方法**であり、各ユーザーが自由に選べます。サーバーは content の意味
+（プロフィール / 投稿 / メディア など）を一切解釈せず、送信タイプに基づいて
+保存・配信するだけです。意味の解釈やプロフィール管理はすべてクライアント側の
+責務となります（例: content が JSON なら特定のキー/値でプロフィールと判定する）。
 
-| 定数          | 値 | 説明                                              |
-|--------------|----|---------------------------------------------------|
-| `KindMetaData` | 0  | プロフィール（メタデータ）。content は JSON で `name` / `about` などを指定 |
-| `KindTextNote` | 1  | テキスト投稿。content は UTF-8 の本文                |
-| `KindMedia`    | 2  | メディア。content にバイナリデータ（画像など）を格納  |
+| 定数              | 値 | 説明                                        | 配信方法                                        |
+|-------------------|----|---------------------------------------------|-------------------------------------------------|
+| `TransTypeJSON`   | 1  | JSON 構造化データ（content は UTF-8 の JSON） | サーバーが受信時に JSON 構文を検証。クライアントは受信後に JSON としてパースし整形表示 |
+| `TransTypeString` | 2  | 文字列（content は UTF-8）                   | そのまま文字列として配信・表示                   |
+| `TransTypeBinary` | 3  | バイナリデータ（content は任意のバイト列）    | バイナリのまま配信。クライアントはサイズのみ表示 |
+| `TransTypeAll`    | 0  | すべてのタイプ（REQ でのみ使用）             | サーバーが全タイプの保存イベントを配信           |
 
 ### EVENT のバイナリ形式
 
 ```
-kind(2) | createdAt(8) | pubkey(33) | tagCount(2)
+transType(2) | createdAt(8) | pubkey(33) | tagCount(2)
 | (tagLen(2) | tag) × tagCount | contentLen(4) | content | signature(64)
 ```
 
-- `kind` — イベント種別（uint16）
+- `transType` — 送信タイプ（uint16: 1 = JSON, 2 = String, 3 = Binary）
 - `createdAt` — Unix タイムスタンプ（秒, uint64）
 - `pubkey` — 送信者の公開鍵（圧縮形式 33 バイト）
 - `tags` — タグ文字列のリスト
-- `content` — 本文（UTF-8）
+- `content` — 本文（タイプに応じて JSON / 文字列 / バイナリ）
 - `signature` — content の SHA-256 ダイジェストに対する ECDSA 署名（64 バイト）
 
 ### REQ のバイナリ形式
 
 ```
-MsgTypeReq(1) | subIdLen(2) | subId | kind(2) | tagKeyLen(2) | tagKey | tagValLen(2) | tagVal
+MsgTypeReq(1) | subIdLen(2) | subId | transType(2) | tagKeyLen(2) | tagKey | tagValLen(2) | tagVal
 ```
 
-- `kind` が `0`（`KindMetaData`）の場合はプロフィールを購読
-- `kind` が `0` 以外の場合は、その種別に一致するタイムラインイベントを購読
-- `tagKey` / `tagVal` でタグによる絞り込みが可能（現在は `tagKey = "pubkey"` でプロフィールを絞り込み、空文字で指定なし）
+- `transType` が `0`（`TransTypeAll`）の場合はすべてのタイプを購読
+- `transType` が `1` / `2` / `3` の場合は、対応するタイプ（JSON / String / Binary）のイベントを購読
+- `tagKey` / `tagVal` でタグによる絞り込みが可能（現在は `tagKey = "pubkey"` で公開鍵を絞り込み、空文字で指定なし）
 
 ### PUSH のバイナリ形式
 
@@ -175,15 +180,16 @@ MsgTypePush(1) | subIdLen(2) | subId | EVENT 本体
 
 ## ストレージ（server.nim）
 
-イベントは LMDB に永続化されます（`./data/` ディレクトリ、起動時に自動作成）。
+イベントは送信タイプごとの DBI に分けて LMDB に永続化されます
+（`./data/` ディレクトリ、起動時に自動作成）。
 
-| DBI         | 保存するイベント                                  | キー                        |
-|-------------|--------------------------------------------------|-----------------------------|
-| `profiles`  | Kind 0（プロフィール）                            | 公開鍵（pubkey）            |
-| `events`    | Kind 1, 2 など（タイムライン）                    | 現在時刻 + Kind + 乱数      |
+| DBI         | 保存するイベント | キー                    |
+|-------------|------------------|-------------------------|
+| `json`      | TransTypeJSON    | 現在時刻 + 乱数         |
+| `string`    | TransTypeString  | 現在時刻 + 乱数         |
+| `binary`    | TransTypeBinary  | 現在時刻 + 乱数         |
 
-- Kind 0 は公開鍵をキーにするため、同じ公開鍵で再投稿するとプロフィールが上書き更新されます
-- タイムラインイベントは追加ごとに一意なキーで保存されます
+- サーバーは content を解釈しないため、どのタイプも一意なキーで追記保存されます
 - サーバー終了時（Ctrl+C）に環境をクローズし、データは再起動後も保持されます
 
 ## 暗号仕様（crypto.nim）

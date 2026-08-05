@@ -3,7 +3,7 @@
 ##
 ## サーバー不要でオフライン実行できる。以下の流れを試せる:
 ##   1. 鍵ペア生成 (crypto.nim)
-##   2. 署名付きイベントの作成 (FodprEvent + signContent)
+##   2. 送信タイプ (TransTypeJSON / String / Binary) ごとの署名付きイベント作成
 ##   3. encodeEvent → decodeEvent によるエンコード / デコード (ラウンドトリップ)
 ##   4. 署名検証 (verifyContent)
 ##   5. 購読要求 (FodprReq) の encodeReq / decodeReq
@@ -13,6 +13,17 @@
 
 import times, streams
 import protocol, crypto
+
+# 送信タイプごとのイベントを生成するヘルパー
+proc makeEvent(transType: uint16, content: string, kp: FodprKeyPair): FodprEvent =
+  return FodprEvent(
+    transType: transType,
+    createdAt: uint64(getTime().toUnix()),
+    pubkey: kp.publicKey,
+    tags: @["p:target_user", "e:parent"],
+    content: content,
+    signature: signContent(kp.privateKey, content)
+  )
 
 proc main() =
   # ------------------------------------------------------------------
@@ -24,37 +35,40 @@ proc main() =
   echo "公開鍵 (fpub 形式): ", fpubEncode(kp.publicKey)
 
   # ------------------------------------------------------------------
-  # 2. 署名付きイベントの作成
+  # 2. 送信タイプごとの署名付きイベント作成
   # ------------------------------------------------------------------
   echo ""
   echo "=== 2. イベント作成と署名 ==="
-  let content = "こんにちは、Fodpr！"
-  let event = FodprEvent(
-    kind: 1,                              # イベント種別
-    createdAt: uint64(getTime().toUnix()),# 作成時刻 (Unix 秒)
-    pubkey: kp.publicKey,                 # 送信者の公開鍵
-    tags: @["p:target_user", "e:parent"], # タグ
-    content: content,                     # 本文
-    signature: signContent(kp.privateKey, content) # 本文への署名
-  )
-  echo "Content : ", event.content
-  echo "Kind    : ", event.kind
-  echo "Tags    : ", event.tags
+
+  # TransTypeJSON: プロフィールなどの構造化データ
+  let jsonEvent = makeEvent(TransTypeJSON, """{"name": "FodprTaro","about": "バイナリプロトコル始動"}""", kp)
+  echo "TransType : ", transTypeName(jsonEvent.transType)
+  echo "Content   : ", jsonEvent.content
+
+  # TransTypeString: テキスト投稿
+  let strEvent = makeEvent(TransTypeString, "こんにちは、Fodpr！", kp)
+  echo "TransType : ", transTypeName(strEvent.transType)
+  echo "Content   : ", strEvent.content
+
+  # TransTypeBinary: バイナリデータ（画像など）
+  let binEvent = makeEvent(TransTypeBinary, "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR...", kp)
+  echo "TransType : ", transTypeName(binEvent.transType)
+  echo "Content   : [バイナリデータ / サイズ: ", binEvent.content.len, " bytes]"
 
   # ------------------------------------------------------------------
   # 3. encodeEvent → decodeEvent (ラウンドトリップ)
   # ------------------------------------------------------------------
   echo ""
-  echo "=== 3. エンコード / デコード ==="
+  echo "=== 3. エンコード / デコード (String イベントで確認) ==="
   # イベントをバイナリ列へ変換
-  let encoded = encodeEvent(event)
+  let encoded = encodeEvent(strEvent)
   echo "エンコード結果のサイズ: ", encoded.len, " bytes"
   # バイト列をストリームとして開き、元のイベントへ復元
   var strm = newStringStream(encoded)
   let decoded = decodeEvent(strm)
-  echo "デコード後の Content : ", decoded.content
-  echo "デコード後の Kind    : ", decoded.kind
-  echo "デコード後の Tags    : ", decoded.tags
+  echo "デコード後の TransType : ", transTypeName(decoded.transType)
+  echo "デコード後の Content   : ", decoded.content
+  echo "デコード後の Tags      : ", decoded.tags
 
   # ------------------------------------------------------------------
   # 4. 署名検証
@@ -71,7 +85,7 @@ proc main() =
   echo "=== 5. REQ エンコード / デコード ==="
   let req = FodprReq(
     subId: "sub_1",
-    kind: 1,
+    transType: TransTypeAll,
     tagKey: "p",
     tagVal: "target_user"
   )
@@ -82,10 +96,10 @@ proc main() =
   var reqStrm = newStringStream(reqEnc)
   discard reqStrm.readChar()  # 種別バイトを読み飛ばし
   let reqDec = decodeReq(reqStrm)
-  echo "subId : ", reqDec.subId
-  echo "kind  : ", reqDec.kind
-  echo "tagKey: ", reqDec.tagKey
-  echo "tagVal: ", reqDec.tagVal
+  echo "subId    : ", reqDec.subId
+  echo "transType: ", transTypeName(reqDec.transType)
+  echo "tagKey   : ", reqDec.tagKey
+  echo "tagVal   : ", reqDec.tagVal
 
   echo ""
   echo "サンプル実行完了！"

@@ -11,6 +11,20 @@
 ##
 ## 数値はすべてビッグエンディアン（ネットワークバイトオーダー）で
 ## エンコードされ、プラットフォーム差を吸収している。
+##
+## 送信タイプ (TransType) と配信方法:
+##   transType は「どのように送るか」を表す送信方法であり、各ユーザーが自由に選べる。
+##   サーバーは content の意味 (プロフィール / 投稿 / メディア など) を一切解釈せず、
+##   送信方法 (transType) に基づいて保存・配信するだけである。
+##   意味の解釈やプロフィールの管理などはすべてクライアント側の責任となる
+##   (例: content が JSON なら特定のキー/値でプロフィールと判定する、など)。
+##   - TransTypeJSON   (1): content は UTF-8 の JSON。サーバーは受信時に JSON 構文を
+##                          検証し、クライアントは受信後に JSON としてパースして表示する。
+##   - TransTypeString (2): content は UTF-8 の文字列。そのまま文字列として配信・表示する。
+##   - TransTypeBinary (3): content は任意のバイト列。バイナリフレームのまま配信し、
+##                          クライアントはサイズのみ表示する（そのまま文字列化しない）。
+##   - TransTypeAll    (0): イベント側では使用しない。REQ でのみ「すべての送信方法を
+##                          購読する」ことを表す。
 
 import streams, endians
 import crypto, secp256k1
@@ -23,46 +37,51 @@ const
   MsgTypeReq*   = char(0x02)   # 購読要求
   MsgTypePush*  = char(0x81)   # イベント配信
   
-  KindMetaData* = 0.uint16
-  KindTextNote* = 1.uint16
-  KindMedia*    = 2.uint16
+  # 送信タイプ (TransType)。
+  # イベントの content を「どのように送るか」を表す。各ユーザーが自由に選べる。
+  TransTypeAll*    = 0.uint16   # すべての送信方法（REQ でのみ使用）
+  TransTypeJSON*   = 1.uint16   # JSON として送信（content は UTF-8 の JSON）
+  TransTypeString* = 2.uint16   # 文字列として送信（content は UTF-8）
+  TransTypeBinary* = 3.uint16   # バイナリとして送信（content は任意のバイト列）
 
 type
   # 投稿されるイベント本体。
   # pubkey と signature は crypto.nim の secp256k1 型を使用する。
   FodprEvent* = object
-    kind*      : uint16       # イベント種別 (0 = すべて)
+    transType* : uint16       # 送信方法 (TransTypeJSON / TransTypeString / TransTypeBinary)
     createdAt* : uint64       # Unix タイムスタンプ（秒）
     pubkey*    : SkPublicKey  # 送信者の公開鍵（圧縮形式 33 バイトで送信）
     tags*      : seq[string]  # タグ文字列のリスト
-    content*   : string       # 本文
+    content*   : string       # 本文（タイプに応じて JSON / 文字列 / バイナリ）
     signature* : FodprSignature # 本文に対する ECDSA 署名
 
   # 購読 (REQ) 要求。
-  # kind が 0 の場合はすべての種別、tagKey/tagVal でタグの絞り込みも可能。
+  # transType が TransTypeAll(0) の場合はすべての送信方法を購読する。
+  # tagKey/tagVal でタグの絞り込みも可能
+  # (例: tagKey="pubkey" で公開鍵を指定)。
   FodprReq* = object
-    subId*  : string   # 購読を識別するための ID
-    kind*   : uint16   # 購読したいイベント種別
-    tagKey* : string   # 絞り込み対象のタグキー
-    tagVal* : string   # 絞り込み対象のタグ値
+    subId*     : string   # 購読を識別するための ID
+    transType* : uint16   # 購読したい送信方法
+    tagKey*    : string   # 絞り込み対象のタグキー
+    tagVal*    : string   # 絞り込み対象のタグ値
 
 # ---------------------------------------------------------------------------
 # EVENT のエンコード
 # ---------------------------------------------------------------------------
 
 # イベントを以下のバイナリ形式にエンコードする:
-#   kind(2) | createdAt(8) | pubkey(33) | tagCount(2) |
+#   transType(2) | createdAt(8) | pubkey(33) | tagCount(2) |
 #   (tagLen(2) | tag) * tagCount | contentLen(4) | content | signature(64)
 proc encodeEvent*(ev: FodprEvent): string =
   result = ""
 
-  # kind (uint16, ビッグエンディアン)
-  var kNet: uint16
-  bigEndian16(addr kNet, unsafeAddr ev.kind)
-  var kBytes: array[2, byte]
-  copyMem(addr kBytes[0], addr kNet, 2)
-  result.add(char(kBytes[0]))
-  result.add(char(kBytes[1]))
+  # transType (uint16, ビッグエンディアン)
+  var ttNet: uint16
+  bigEndian16(addr ttNet, unsafeAddr ev.transType)
+  var ttBytes: array[2, byte]
+  copyMem(addr ttBytes[0], addr ttNet, 2)
+  result.add(char(ttBytes[0]))
+  result.add(char(ttBytes[1]))
 
   # createdAt (uint64, ビッグエンディアン)
   var caNet: uint64
@@ -115,11 +134,11 @@ proc encodeEvent*(ev: FodprEvent): string =
 # encodeEvent とは逆に、ストリームからバイナリデータを読み込んで
 # FodprEvent オブジェクトへ復元する。
 proc decodeEvent*(stream: Stream): FodprEvent =
-  # kind (2 バイト)
-  let kBytes = stream.readStr(2)
-  var kNet, kindVal: uint16
-  copyMem(addr kNet, unsafeAddr kBytes[0], 2)
-  bigEndian16(addr kindVal, addr kNet)
+  # transType (2 バイト)
+  let ttBytes = stream.readStr(2)
+  var ttNet, ttVal: uint16
+  copyMem(addr ttNet, unsafeAddr ttBytes[0], 2)
+  bigEndian16(addr ttVal, addr ttNet)
 
   # createdAt (8 バイト)
   let caBytes = stream.readStr(8)
@@ -162,7 +181,7 @@ proc decodeEvent*(stream: Stream): FodprEvent =
   let skSig = parseSignature(sigBytesArr)
 
   return FodprEvent(
-    kind: kindVal,
+    transType: ttVal,
     createdAt: caVal,
     pubkey: pubkey,
     tags: tags,
@@ -175,7 +194,7 @@ proc decodeEvent*(stream: Stream): FodprEvent =
 # ---------------------------------------------------------------------------
 
 # 購読要求を以下のバイナリ形式にエンコードする:
-#   MsgTypeReq(1) | subIdLen(2) | subId | kind(2) |
+#   MsgTypeReq(1) | subIdLen(2) | subId | transType(2) |
 #   tagKeyLen(2) | tagKey | tagValLen(2) | tagVal
 proc encodeReq*(r: FodprReq): string =
   result = ""
@@ -191,13 +210,13 @@ proc encodeReq*(r: FodprReq): string =
   result.add(char(idBytes[1]))
   result.add(r.subId)
 
-  # kind (uint16, ビッグエンディアン)
-  var kNet: uint16
-  bigEndian16(addr kNet, unsafeAddr r.kind)
-  var kBytes: array[2, byte]
-  copyMem(addr kBytes[0], addr kNet, 2)
-  result.add(char(kBytes[0]))
-  result.add(char(kBytes[1]))
+  # transType (uint16, ビッグエンディアン)
+  var ttNet: uint16
+  bigEndian16(addr ttNet, unsafeAddr r.transType)
+  var ttBytes: array[2, byte]
+  copyMem(addr ttBytes[0], addr ttNet, 2)
+  result.add(char(ttBytes[0]))
+  result.add(char(ttBytes[1]))
 
   # tagKey（長さは uint16）
   let tkLen = uint16(r.tagKey.len)
@@ -228,11 +247,11 @@ proc decodeReq*(stream: Stream): FodprReq =
   bigEndian16(addr idLen, addr idNet)
   let subId = stream.readStr(int(idLen))
 
-  # kind (uint16)
-  let kBytes = stream.readStr(2)
-  var kNet, kindVal: uint16
-  copyMem(addr kNet, unsafeAddr kBytes[0], 2)
-  bigEndian16(addr kindVal, addr kNet)
+  # transType (uint16)
+  let ttBytes = stream.readStr(2)
+  var ttNet, ttVal: uint16
+  copyMem(addr ttNet, unsafeAddr ttBytes[0], 2)
+  bigEndian16(addr ttVal, addr ttNet)
 
   # tagKey（長さは uint16）
   let tkLenBytes = stream.readStr(2)
@@ -248,4 +267,14 @@ proc decodeReq*(stream: Stream): FodprReq =
   bigEndian16(addr tvLen, addr tvNet)
   let tagVal = stream.readStr(int(tvLen))
 
-  return FodprReq(subId: subId, kind: kindVal, tagKey: tagKey, tagVal: tagVal)
+  return FodprReq(subId: subId, transType: ttVal, tagKey: tagKey, tagVal: tagVal)
+
+# 送信タイプの数値から表示用の名前を返す。
+# ログ出力やクライアントでの配信方法の判別表示に使う。
+proc transTypeName*(transType: uint16): string =
+  case transType
+  of TransTypeAll:    "All"
+  of TransTypeJSON:   "JSON"
+  of TransTypeString: "String"
+  of TransTypeBinary: "Binary"
+  else: "Unknown(" & $transType & ")"

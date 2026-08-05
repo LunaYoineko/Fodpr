@@ -11,16 +11,20 @@
 ## 安全にサーバーを終了する。
 
 import std/atomics
+import std/json
 import asynchttpserver, asyncdispatch, streams, strutils, endians, os, times, random
 import ws
 import secp256k1
 import lmdb
 import protocol, crypto
 
-# LMDB の環境とデータベースハンドル
+# LMDB の環境とデータベースハンドル。
+# サーバーは content の意味 (プロフィール管理など) を一切解釈せず、
+# 送信方法 (transType) ごとのストレージに追記保存するだけである。
 var dbenv: LMDBEnv
-var dbiProfiles: Dbi
-var dbiEvents: Dbi
+var dbiJson: Dbi      # TransTypeJSON   用 (キー: 現在時刻+乱数 = 追記)
+var dbiString: Dbi    # TransTypeString 用 (キー: 現在時刻+乱数 = 追記)
+var dbiBinary: Dbi    # TransTypeBinary 用 (キー: 現在時刻+乱数 = 追記)
 
 # Ctrl+C (SIGINT) を受けたことを記録するフラグ。
 # シグナルハンドラは「シグナル割り込みの中」で実行されるため、
@@ -40,15 +44,56 @@ proc initDatabase() =
       createDir("data")
   
   # 環境の作成とオープン(複数のDBIを使うためmaxdbsを指定)
-  dbenv = newLMDBEnv("data", maxdbs = 2)
+  dbenv = newLMDBEnv("data", maxdbs = 3)
   
-  # トランザクションを開始してプロフィール用とイベント用のDBIを開く
+  # トランザクションを開始して送信タイプごとのDBIを開く
   let txn = dbenv.newTxn()
-  dbiProfiles = txn.dbiOpen("profiles", CREATE)
-  dbiEvents = txn.dbiOpen("events", CREATE)
+  dbiJson = txn.dbiOpen("json", CREATE)
+  dbiString = txn.dbiOpen("string", CREATE)
+  dbiBinary = txn.dbiOpen("binary", CREATE)
   txn.commit()
   
   echo "[DB] LMDB ストレージの初期化が完了しました(./data)"
+
+# 指定 DBI の保存イベントを走査し、購読条件に一致するものを PUSH パケット
+# (バイナリフレーム) としてクライアントへ送信する。
+# サーバーは content の意味を解釈せず、送信方法 (transType) による DBI の選択と
+# タグ条件 (pubkey など) による絞り込みのみを行う。
+proc pushEventsFromDbi(txn: LMDBTxn, dbi: Dbi, subReq: FodprReq, ws: WebSocket) {.async, gcsafe.} =
+    let cursor = txn.cursorOpen(dbi)
+    var kVal, dVal: Val
+
+    # カーソルで全イベントを走査
+    while cursorGet(cursor, addr kVal, addr dVal, NEXT) == 0:
+        # pubkey タグによる絞り込み (イベントをデコードして公開鍵を比較)
+        if subReq.tagKey == "pubkey" and subReq.tagVal != "":
+            var enc = newString(int(dVal.mvSize))
+            if dVal.mvSize > 0:
+                copyMem(addr enc[0], dVal.mvData, int(dVal.mvSize))
+            let evt = decodeEvent(newStringStream(enc))
+            if $evt.pubkey.toRawCompressed() != subReq.tagVal:
+                continue
+
+        # 保存済みイベント本体を取り出す
+        var encoded = newString(int(dVal.mvSize))
+        if dVal.mvSize > 0:
+            copyMem(addr encoded[0], dVal.mvData, int(dVal.mvSize))
+
+        # PUSH パケット作成・送信
+        var pushData = ""
+        pushData.add(MsgTypePush)
+        let subIdLen = uint16(subReq.subId.len)
+        var siNet: uint16
+        bigEndian16(addr siNet, unsafeAddr subIdLen)
+        var siBytes: array[2, byte]
+        copyMem(addr siBytes[0], addr siNet, 2)
+        pushData.add(char(siBytes[0]))
+        pushData.add(char(siBytes[1]))
+        pushData.add(subReq.subId)
+        pushData.add(encoded)
+        await ws.send(pushData, Binary)
+
+    cursor.cursorClose()
 
 # 各 HTTP リクエストを処理するコールバック。
 # URL が "/" (ルートパス) で WebSocket アップグレードヘッダがあるときだけ
@@ -64,7 +109,12 @@ proc cb(req: Request) {.async, gcsafe.} =
 
             # 接続が開いている限りパケットを受信し続ける
             while ws.readyState == Open:
-                let packet = await ws.receiveStrPacket()
+                # バイナリフレームで受信する。テキストフレームは UTF-8 エンコードのため、
+                # 公開鍵や署名などの任意バイト列(0x80以上)をそのまま運べない。
+                let packetBytes = await ws.receiveBinaryPacket()
+                var packet = newString(packetBytes.len)
+                if packetBytes.len > 0:
+                    copyMem(addr packet[0], unsafeAddr packetBytes[0], packetBytes.len)
                 if packet.len == 0:
                     continue  # 空パケットは無視
 
@@ -86,25 +136,42 @@ proc cb(req: Request) {.async, gcsafe.} =
                             await ws.send("ERR: Invalid signature")
                             continue
 
+                        # 未定義の送信タイプは拒否する
+                        if event.transType != TransTypeJSON and
+                           event.transType != TransTypeString and
+                           event.transType != TransTypeBinary:
+                            echo "[拒否] 未定義の送信タイプです: ", event.transType
+                            await ws.send("ERR: Unknown trans type")
+                            continue
+
+                        # JSON タイプは content が正しい JSON であることを検証する
+                        if event.transType == TransTypeJSON:
+                            try:
+                                discard parseJson(event.content)
+                            except:
+                                echo "[拒否] JSON として不正な content を検知しました"
+                                await ws.send("ERR: Invalid JSON content")
+                                continue
+
                         # 検証に成功したイベントを保存
-                        # ({.gcsafe.} ブロックで async クロージャ内の操作を許可)
+                        # (サーバーは content の意味を解釈しない。送信方法
+                        #  (transType) ごとのストレージに一意なキーで追記保存する)
                         {.gcsafe.}:
                             let txn = dbenv.newTxn()
                             let encoded = encodeEvent(event)
-                            
-                            if event.kind == KindMetaData:
-                                # プロフィール(Kind 0): pubkey をキーにして保存
-                                let pubKeyStr = $event.pubkey.toRawCompressed()
-                                txn.put(dbiProfiles, pubKeyStr, encoded)
-                                txn.commit()
-                                echo "[保存] プロフィールを更新しました(Pubkey: ", pubKeyStr, ")"
+
+                            # 一意なキー(現在時刻+乱数)で追記保存
+                            let timeKey = "evt_" & $epochTime() & "_" & $event.transType & "_" & $rand(100000)
+                            case event.transType
+                            of TransTypeJSON:
+                                txn.put(dbiJson, timeKey, encoded)
+                            of TransTypeString:
+                                txn.put(dbiString, timeKey, encoded)
                             else:
-                                # タイムラインイベント(Kind 1, 2など): 一意なキー(現在時刻等)で保存
-                                let timeKey = "evt_" & $epochTime() & "_" & $event.kind & "_" & $rand(100000)
-                                txn.put(dbiEvents, timeKey, encoded)
-                                txn.commit()
-                                echo "[保存] タイムラインイベントを保存しました(Kind: ", event.kind, ")"
-                                
+                                txn.put(dbiBinary, timeKey, encoded)
+                            echo "[保存] イベントを保存しました(TransType: ", transTypeName(event.transType), ")"
+                            txn.commit()
+
                         await ws.send("OK: Event accepted")
                     except Exception as e:
                         echo "[エラー] イベントパース失敗: ", e.msg
@@ -114,80 +181,24 @@ proc cb(req: Request) {.async, gcsafe.} =
                 elif msgType == MsgTypeReq:
                     try:
                         let subReq = decodeReq(strm)
-                        echo "[購読] サブスクリプション要求受領 [ID: ", subReq.subId, "] (Kind: ", subReq.kind, ")"
+                        echo "[購読] サブスクリプション要求受領 [ID: ", subReq.subId, "] (TransType: ", transTypeName(subReq.transType), ")"
 
-                        # 保存済みイベントから条件に一致するものを走査
+                        # 保存済みイベントから transType に一致するものを PUSH 配信する
                         {.gcsafe.}:
                             let txn = dbenv.newTxn()
-                            
-                            # プロフィール(Kind 0)の配信処理
-                            if subReq.kind == 0 or subReq.kind == KindMetaData:
-                                let cursor = txn.cursorOpen(dbiProfiles)
-                                var kVal, dVal: Val
-                                
-                                # カーソルで全プロフィールを走査
-                                while cursorGet(cursor, addr kVal, addr dVal, NEXT) == 0:
-                                    var retrievedPubkey = newString(int(kVal.mvSize))
-                                    if kVal.mvSize > 0:
-                                        copyMem(addr retrievedPubkey[0], kVal.mvData, int(kVal.mvSize))
-                                        
-                                    # tagKey によるフィルタリング
-                                    if subReq.tagKey == "pubkey" and subReq.tagVal != "" and subReq.tagVal != retrievedPubkey:
-                                        continue
-                                        
-                                    var encoded = newString(int(dVal.mvSize))
-                                    if dVal.mvSize > 0:
-                                        copyMem(addr encoded[0], dVal.mvData, int(dVal.mvSize))
-                                        
-                                    # PUSH パケット作成・送信
-                                    var pushData = ""
-                                    pushData.add(MsgTypePush)
-                                    let subIdLen = uint16(subReq.subId.len)
-                                    var siNet: uint16
-                                    bigEndian16(addr siNet, unsafeAddr subIdLen)
-                                    var siBytes: array[2, byte]
-                                    copyMem(addr siBytes[0], addr siNet, 2)
-                                    pushData.add(char(siBytes[0]))
-                                    pushData.add(char(siBytes[1]))
-                                    pushData.add(subReq.subId)
-                                    pushData.add(encoded)
-                                    await ws.send(pushData)
-                                    
-                                cursor.cursorClose()
-                                
-                            # タイムラインイベント(Kind 1, 2など)の配信処理
-                            let cursorEvt = txn.cursorOpen(dbiEvents)
-                            var ekVal, edVal: Val
-                            
-                            while cursorGet(cursorEvt, addr ekVal, addr edVal, NEXT) == 0:
-                                var encoded = newString(int(edVal.mvSize))
-                                if edVal.mvSize > 0:
-                                    copyMem(addr encoded[0], edVal.mvData, int(edVal.mvSize))
-                                    
-                                # デコードして Kind を判定
-                                var strmEvt = newStringStream(encoded)
-                                let decodedEvt = decodeEvent(strmEvt)
-                                
-                                if decodedEvt.kind == KindMetaData:
-                                    continue
-                                
-                                if subReq.kind == 0 or decodedEvt.kind != subReq.kind:
-                                    continue
-                                    
-                                var pushData = ""
-                                pushData.add(MsgTypePush)
-                                let subIdLen = uint16(subReq.subId.len)
-                                var siNet: uint16
-                                bigEndian16(addr siNet, unsafeAddr subIdLen)
-                                var siBytes: array[2, byte]
-                                copyMem(addr siBytes[0], addr siNet, 2)
-                                pushData.add(char(siBytes[0]))
-                                pushData.add(char(siBytes[1]))
-                                pushData.add(subReq.subId)
-                                pushData.add(encoded)
-                                await ws.send(pushData)
-                                
-                            cursorEvt.cursorClose()
+
+                            case subReq.transType
+                            of TransTypeJSON:
+                                await pushEventsFromDbi(txn, dbiJson, subReq, ws)
+                            of TransTypeString:
+                                await pushEventsFromDbi(txn, dbiString, subReq, ws)
+                            of TransTypeBinary:
+                                await pushEventsFromDbi(txn, dbiBinary, subReq, ws)
+                            else:
+                                # TransTypeAll: すべてのタイプを順番に配信する
+                                await pushEventsFromDbi(txn, dbiJson, subReq, ws)
+                                await pushEventsFromDbi(txn, dbiString, subReq, ws)
+                                await pushEventsFromDbi(txn, dbiBinary, subReq, ws)
                             txn.commit()
 
                         # 保存済みイベントの配信が終わったことを通知
@@ -241,8 +252,9 @@ proc main() {.async.} =
         discard
 
     # LMDB のクローズ
-    dbenv.close(dbiProfiles)
-    dbenv.close(dbiEvents)
+    dbenv.close(dbiJson)
+    dbenv.close(dbiString)
+    dbenv.close(dbiBinary)
     dbenv.envClose()
         
     echo "[終了] サーバーは正常に終了しました。"
