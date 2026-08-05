@@ -2,3 +2,6 @@
 /nimble.paths
 /config.nims
 /src/server
+nimble.develop
+nimbledeps
+/data
