@@ -172,6 +172,7 @@ FodprRelay/
 |-------|-------|--------------------------|------------------------------|
 | 0x01  | EVENT | client → server          | Post a signed event          |
 | 0x02  | REQ   | client → server          | Subscription request         |
+| 0x03  | DEL   | client → server          | Delete-events request (signed)|
 | 0x81  | PUSH  | server → client          | Event delivery               |
 
 All integers are encoded in **big-endian** byte order.
@@ -221,6 +222,55 @@ MsgTypeReq(1) | subIdLen(2) | subId | transType(2) | tagKeyLen(2) | tagKey | tag
 ```
 MsgTypePush(1) | subIdLen(2) | subId | EVENT payload
 ```
+
+### DEL binary layout (event delete API)
+
+Authors can delete their own events. Because the whole request is signed,
+**only the author of an event can delete it**.
+
+```
+MsgTypeDel(1) | transType(2) | targetType(1) | pubkey(33)
+| [createdAt(8) | contentHash(32)] | signature(64)
+```
+
+**Signed data** (the bytes below, excluding `signature`):
+
+```
+transType(2) | targetType(1) | pubkey(33) | [createdAt(8) | contentHash(32)]
+```
+
+- `transType` — transmission type of the events to delete (`0` = all, `1` = JSON, `2` = String, `3` = Binary)
+- `targetType` — how to select the target events
+  - `0` (`DelTargetPubkey`): delete all events of that public key within the given `transType`
+  - `1` (`DelTargetEvent`): delete the specific event whose `createdAt` and `contentHash` (SHA-256 of `content`) match
+- `pubkey` — public key of the events to delete (your own public key only)
+- `signature` — ECDSA signature (64 bytes) over the signed data above, made with the author's private key
+
+The server verifies the signature and deletes only events whose public key
+matches the request (others' events cannot be deleted).
+
+API provided by the library:
+
+```nim
+var req = FodprDelReq(
+  transType: TransTypeJSON,    # transmission type to delete
+  targetType: DelTargetPubkey, # delete by pubkey / DelTargetEvent for a specific event
+  pubkey: kp.publicKey,        # your public key
+  createdAt: ev.createdAt,     # only for DelTargetEvent
+  contentHash: hash,           # only for DelTargetEvent (SHA-256 of content)
+  signature: sig)              # value signed below
+let packet = encodeDel(req)    # full DEL packet (leading 0x03 + signature)
+```
+
+Sign the bytes returned by `encodeDelSignedData(req)`:
+
+```nim
+let signed = encodeDelSignedData(req)
+req.signature = signContent(kp.privateKey, signed)
+```
+
+On the server side, restore the packet with `decodeDelReq(stream)` and verify
+the signature with `verifyContent`.
 
 ### Storage (server.nim in FodprRelay)
 

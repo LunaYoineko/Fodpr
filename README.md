@@ -171,6 +171,7 @@ FodprRelay/
 |------|-------|--------------------------|----------------------------|
 | 0x01 | EVENT | クライアント → サーバー | 署名付きイベントの投稿     |
 | 0x02 | REQ   | クライアント → サーバー | サブスクリプション要求     |
+| 0x03 | DEL   | クライアント → サーバー | イベント削除要求（署名付き）|
 | 0x81 | PUSH  | サーバー → クライアント | イベント配信               |
 
 数値はすべて **ビッグエンディアン** でエンコードされます。
@@ -218,6 +219,55 @@ MsgTypeReq(1) | subIdLen(2) | subId | transType(2) | tagKeyLen(2) | tagKey | tag
 ```
 MsgTypePush(1) | subIdLen(2) | subId | EVENT 本体
 ```
+
+### DEL のバイナリ形式（イベント削除 API）
+
+投稿者は自分のイベントを削除できます。要求全体に署名を付けることで、
+**送信者本人だけが自分の投稿を削除できる**仕組みです。
+
+```
+MsgTypeDel(1) | transType(2) | targetType(1) | pubkey(33)
+| [createdAt(8) | contentHash(32)] | signature(64)
+```
+
+**署名対象**（`signature` を除いた以下のバイト列）:
+
+```
+transType(2) | targetType(1) | pubkey(33) | [createdAt(8) | contentHash(32)]
+```
+
+- `transType` — 削除対象の送信タイプ（`0`=全タイプ, `1`=JSON, `2`=String, `3`=Binary）
+- `targetType` — 削除対象の指定方法
+  - `0`（`DelTargetPubkey`）: その公開鍵のイベントを `transType` 単位で全削除
+  - `1`（`DelTargetEvent`）: `createdAt` と `contentHash`（content の SHA-256）が一致する特定イベントを削除
+- `pubkey` — 削除対象イベントの公開鍵（自分の公開鍵のみ）
+- `signature` — 上記の署名対象を送信者の秘密鍵で署名した ECDSA 署名（64 バイト）
+
+サーバーは署名を検証し、イベントの公開鍵が要求の公開鍵と一致するものだけを
+削除します（他人のイベントは削除できません）。
+
+ライブラリが提供する API:
+
+```nim
+var req = FodprDelReq(
+  transType: TransTypeJSON,   # 削除対象の送信タイプ
+  targetType: DelTargetPubkey,# 公開鍵単位で削除 / DelTargetEvent で特定イベント
+  pubkey: kp.publicKey,       # 自分の公開鍵
+  createdAt: ev.createdAt,    # DelTargetEvent のときのみ有効
+  contentHash: hash,          # DelTargetEvent のときのみ有効 (content の SHA-256)
+  signature: sig)             # 下記で署名した値
+let packet = encodeDel(req)   # 完全な DEL パケット（先頭 0x03 + 署名つき）
+```
+
+署名は `encodeDelSignedData(req)` の返すバイト列に対して行います:
+
+```nim
+let signed = encodeDelSignedData(req)
+req.signature = signContent(kp.privateKey, signed)
+```
+
+サーバー側では `decodeDelReq(stream)` でパケットを復元し、`verifyContent` で
+署名を検証します。
 
 ### ストレージ（FodprRelay の server.nim）
 

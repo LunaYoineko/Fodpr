@@ -7,6 +7,7 @@
 ## パケット構造（先頭 1 バイトがメッセージ種別）:
 ##   - 0x01 (EVENT): イベント投稿（署名付き）
 ##   - 0x02 (REQ)  : サブスクリプション要求
+##   - 0x03 (DEL)  : イベント削除要求（署名付き）
 ##   - 0x81 (PUSH) : サーバー → クライアントのイベント配信
 ##
 ## 数値はすべてビッグエンディアン（ネットワークバイトオーダー）で
@@ -35,6 +36,7 @@ import crypto, secp256k1
 const
   MsgTypeEvent* = char(0x01)   # イベント投稿
   MsgTypeReq*   = char(0x02)   # 購読要求
+  MsgTypeDel*   = char(0x03)   # イベント削除要求 (クライアント → サーバー)
   MsgTypePush*  = char(0x81)   # イベント配信
   
   # 送信タイプ (TransType)。
@@ -43,6 +45,10 @@ const
   TransTypeJSON*   = 1.uint16   # JSON として送信（content は UTF-8 の JSON）
   TransTypeString* = 2.uint16   # 文字列として送信（content は UTF-8）
   TransTypeBinary* = 3.uint16   # バイナリとして送信（content は任意のバイト列）
+
+  # 削除要求 (DEL) の削除対象タイプ。
+  DelTargetPubkey* = 0.uint8   # 公開鍵単位で削除 (その送信者のイベントを全削除)
+  DelTargetEvent*  = 1.uint8   # 特定イベントを削除 (createdAt + contentハッシュで特定)
 
 type
   # 投稿されるイベント本体。
@@ -64,6 +70,18 @@ type
     transType* : uint16   # 購読したい送信方法
     tagKey*    : string   # 絞り込み対象のタグキー
     tagVal*    : string   # 絞り込み対象のタグ値
+
+  # 削除 (DEL) 要求。
+  # 送信者本人だけが自分のイベントを削除できるよう、要求全体に署名を付ける。
+  # サーバーは署名を検証し、削除対象イベントの公開鍵が要求の公開鍵と
+  # 一致するものだけを削除する。
+  FodprDelReq* = object
+    transType*  : uint16            # 削除対象の送信タイプ (TransTypeAll=0 は全タイプ)
+    targetType* : uint8             # DelTargetPubkey / DelTargetEvent
+    pubkey*     : SkPublicKey       # 削除対象イベントの公開鍵
+    createdAt*  : uint64            # DelTargetEvent のときのみ有効
+    contentHash*: array[32, byte]   # DelTargetEvent のときのみ有効 (content の SHA-256)
+    signature*  : FodprSignature    # 上記フィールド全体に対する署名
 
 # ---------------------------------------------------------------------------
 # EVENT のエンコード
@@ -268,6 +286,96 @@ proc decodeReq*(stream: Stream): FodprReq =
   let tagVal = stream.readStr(int(tvLen))
 
   return FodprReq(subId: subId, transType: ttVal, tagKey: tagKey, tagVal: tagVal)
+
+# ---------------------------------------------------------------------------
+# DEL (イベント削除) のエンコード・デコード
+# ---------------------------------------------------------------------------
+# パケット形式 (クライアント → サーバー):
+#   msgType(1) | transType(2) | targetType(1) | pubkey(33) |
+#   [createdAt(8) | contentHash(32)] | signature(64)
+#
+# 署名対象 (transType 以降、signature を除いたバイト列):
+#   transType(2) | targetType(1) | pubkey(33) | [createdAt(8) | contentHash(32)]
+# 署名は送信者本人の秘密鍵で行い、サーバーは要求内の pubkey で検証する。
+# これにより「自分の投稿だけを自分が消せる」ことを保証する。
+#
+# targetType による削除対象の違い:
+#   DelTargetPubkey(0) : その pubkey のイベントを transType 単位で全削除
+#   DelTargetEvent(1)  : createdAt と contentHash が一致する特定イベントを削除
+
+# 署名対象のバイト列を作成する。クライアント側とサーバー側で
+# バイト列を完全に一致させる必要がある。
+proc encodeDelSignedData*(req: FodprDelReq): string =
+  # transType(2) | targetType(1) | pubkey(33) | [createdAt(8) | contentHash(32)]
+  var ttNet: uint16
+  bigEndian16(addr ttNet, unsafeAddr req.transType)
+  var ttBytes: array[2, byte]
+  copyMem(addr ttBytes[0], addr ttNet, 2)
+  result.add(char(ttBytes[0]))
+  result.add(char(ttBytes[1]))
+  result.add(char(req.targetType))
+  let pubRaw = req.pubkey.toRawCompressed()
+  for b in pubRaw: result.add(char(b))
+  if req.targetType == DelTargetEvent:
+    var caNet: uint64
+    bigEndian64(addr caNet, unsafeAddr req.createdAt)
+    var caBytes: array[8, byte]
+    copyMem(addr caBytes[0], addr caNet, 8)
+    for b in caBytes: result.add(char(b))
+    for b in req.contentHash: result.add(char(b))
+
+# 削除要求全体をワイヤ形式にエンコードする (クライアント用)。
+# 署名済みの FodprDelReq を渡すと、先頭に msgType(0x03) を付与し、
+# 末尾に署名を付けて完全なパケットを生成する。
+proc encodeDel*(req: FodprDelReq): string =
+  result = $MsgTypeDel
+  result.add(encodeDelSignedData(req))
+  let sigRaw = req.signature.sig.toRaw()
+  for b in sigRaw: result.add(char(b))
+
+# encodeDel とは逆に、ストリームから削除要求を復元する (サーバー用)。
+proc decodeDelReq*(stream: Stream): FodprDelReq =
+  # transType (uint16, ビッグエンディアン)
+  let ttBytes = stream.readStr(2)
+  var ttNet, ttVal: uint16
+  copyMem(addr ttNet, unsafeAddr ttBytes[0], 2)
+  bigEndian16(addr ttVal, addr ttNet)
+
+  # targetType (1 バイト)
+  let tgtByte = stream.readChar()
+
+  # pubkey (圧縮形式 33 バイト)
+  let pubBytes = stream.readStr(33)
+  var pubArr: array[33, byte]
+  for i in 0..<33: pubArr[i] = byte(pubBytes[i])
+  let pubkey = parsePublicKey(pubArr)
+
+  # 特定イベント削除の場合のみ createdAt と contentHash を読む
+  var createdAt: uint64
+  var contentHash: array[32, byte]
+  if byte(tgtByte) == DelTargetEvent:
+    let caBytes = stream.readStr(8)
+    var caNet, caVal: uint64
+    copyMem(addr caNet, unsafeAddr caBytes[0], 8)
+    bigEndian64(addr caVal, addr caNet)
+    createdAt = caVal
+    let hashBytes = stream.readStr(32)
+    for i in 0..<32: contentHash[i] = byte(hashBytes[i])
+
+  # signature (compact 形式 64 バイト)
+  let sigBytes = stream.readStr(64)
+  var sigArr: array[64, byte]
+  for i in 0..<64: sigArr[i] = byte(sigBytes[i])
+  let signature = FodprSignature(sig: parseSignature(sigArr))
+
+  result = FodprDelReq(
+    transType: ttVal,
+    targetType: byte(tgtByte),
+    pubkey: pubkey,
+    createdAt: createdAt,
+    contentHash: contentHash,
+    signature: signature
+  )
 
 # 送信タイプの数値から表示用の名前を返す。
 # ログ出力やクライアントでの配信方法の判別表示に使う。
