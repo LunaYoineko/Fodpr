@@ -1,83 +1,78 @@
-# Fodpr
+# Fodpr（ふぉどぷる）
 
 **Fully Open Decentralized Protocol**
 
-Fodpr is a lightweight event-delivery protocol that runs over WebSocket.
-Clients post signed events to a relay server and receive matching events in
-real time by sending subscription requests (REQ).
+Fodpr (pronounced "fodopuru" in Japanese, written ふぉどぷる) is a **protocol**
+— a set of communication rules — for exchanging social-media-style posts
+(**events**) without depending on any specific company or service. Posts are
+sent and received through a **relay server**, a kind of relay station.
 
 > 日本語版は [README.md](README.md) をご覧ください。
 
-## Features
+---
 
-- **Signed events** — Every event is signed with secp256k1 (ECDSA); the relay verifies authenticity and rejects tampered events
-- **Simple binary protocol** — Fixed-size integers (big-endian) plus length-prefixed fields
-- **Bech32 encoding** — Private keys can be exchanged as `fsec1...` and public keys as `fpub1...`
-- **Persistent LMDB storage** — Received events are split into per-type DBs (JSON / String / Binary) and survive restarts (a relay-server feature)
-- **Transmission types (TransType)** — Each user freely picks a transmission method from JSON / String / Binary. The server never interprets `content` semantics; it only stores and delivers based on the transmission type (all semantic interpretation such as profile management is the client's responsibility)
-- **Standalone relay server (FodprRelay)** — The relay server lives in the separate [FodprRelay](https://github.com/LunaYoineko/FodprRelay) repository (Docker support / graceful shutdown)
+## What Fodpr lets you do
 
-## Directory Layout
+- **Open to everyone**
+  It runs on open rules, so no single company or service is in charge.
 
-```
-Fodpr/
-├── Fodpr.nimble        # Nimble package definition (Library type)
-├── src/
-│   ├── Fodpr.nim       # Library main module (re-exports protocol / crypto)
-│   ├── protocol.nim    # Wire protocol encode / decode
-│   └── crypto.nim      # Bech32 and secp256k1 (keygen, signing, verification)
-├── examples/
-│   ├── fodpr_client.nim    # Sample client that talks to the relay server
-│   └── protocol_demo.nim   # Sample using protocol.nim (no server needed)
-├── LICENSES/           # Third-party library license information
-├── README.md           # 日本語版 README
-└── data/               # LMDB database (used by the relay server, git-ignored)
-```
+- **No impersonation or tampering**
+  Every post carries an **electronic signature**, so anyone can verify that it
+  was written by the real author and has not been altered.
 
-The relay server (FodprRelay) is maintained in a separate repository:
+- **Not tied to a single server**
+  Anyone can run a relay server. Even if one server goes down, communication
+  continues as long as other servers exist.
 
-```
-FodprRelay/
-├── FodprRelay.nimble   # Nimble package definition (requires "https://github.com/LunaYoineko/Fodpr")
-├── Dockerfile          # Docker image definition for the relay server
-├── docker-compose.yml  # Docker Compose config (port 8000 / data volume)
-└── src/
-    └── server.nim      # Relay server
-```
+- **Free choice of post format**
+  The sender freely picks one of three formats: JSON (structured data),
+  String (plain text), or Binary (e.g. image data).
 
-## Requirements
+## How it works in one glance
+
+Think of it like the postal system: the **relay server** is the post office,
+an **event** is a letter, and the **electronic signature** is the sender's seal.
+
+1. **Post** — the sender attaches an electronic signature and sends the event to a relay server
+2. **Store** — the relay server checks the signature and keeps the event
+3. **Request** — a reader asks the relay server, "Please send me events of this type"
+4. **Receive** — the relay server delivers the matching events in real time
+
+## Key terms
+
+| Term                | Meaning                                                    |
+|---------------------|------------------------------------------------------------|
+| Protocol            | The rules computers follow to communicate                  |
+| Event               | One post's worth of data                                   |
+| Relay server        | The "post office" that stores and delivers events          |
+| Client              | An app or tool that uses Fodpr                             |
+| Public/private key  | A key pair that proves who you are                         |
+| Electronic signature| A digital seal that only the real author can create        |
+| Subscription (REQ)  | Asking the relay server, "Please send me events"           |
+
+---
+
+## Getting started (for developers)
+
+### Requirements
 
 - [Nim](https://nim-lang.org/) 2.2.10 or later
 - [Nimble](https://github.com/nim-lang/nimble) (used to install dependencies)
-- For a native relay server run, the LMDB runtime library is required (on Debian/Ubuntu: `liblmdb0`), see FodprRelay
-- For Docker relay runs, [Docker Engine](https://docs.docker.com/engine/) and [Docker Compose](https://docs.docker.com/compose/)
+- For a native relay server run, the LMDB runtime library is required
+  (on Debian/Ubuntu: `liblmdb0`), see FodprRelay
+- For Docker relay runs, [Docker Engine](https://docs.docker.com/engine/) and
+  [Docker Compose](https://docs.docker.com/compose/)
 
-## Build
+### Big picture
 
-Install dependencies:
-
-```bash
-nimble install -d
-```
-
-Run the sample client (while the relay server is up, in another terminal):
-
-```bash
-nim c -r examples/fodpr_client.nim
-```
-
-Run the protocol encode / decode sample:
-
-```bash
-nim c -r examples/protocol_demo.nim
-```
-
-## Usage
+1. Start the relay server (the "post office")
+2. Run the client (the posting / reading tool)
 
 ### 1. Start the relay server (FodprRelay)
 
-The relay server lives in the separate [FodprRelay](https://github.com/LunaYoineko/FodprRelay)
-repository. Clone it and run:
+The relay server lives in the separate
+[FodprRelay](https://github.com/LunaYoineko/FodprRelay) repository.
+Clone it and run:
 
 ```bash
 git clone https://github.com/LunaYoineko/FodprRelay
@@ -85,6 +80,8 @@ cd FodprRelay
 nimble build -y
 ./src/server
 ```
+
+On startup you will see:
 
 ```
 ================================================
@@ -102,10 +99,10 @@ cd FodprRelay
 docker compose up -d --build
 ```
 
-After it starts, visiting `http://localhost:8000/` returns a small
-placeholder text for verification. Follow logs with `docker compose logs -f`.
+After it starts, visiting `http://localhost:8000/` returns a small placeholder
+text for verification. Follow the logs with `docker compose logs -f`.
 
-### 2. Start the client
+### 2. Run the client
 
 In another terminal:
 
@@ -116,10 +113,12 @@ nim c -r examples/fodpr_client.nim
 The client performs the following:
 
 1. Connects to `ws://localhost:8000/`
-2. Generates a key pair and posts three events as EVENTs: JSON, String, and Binary (each gets `OK: Event accepted`)
+2. Generates a key pair and posts three events as EVENTs: JSON, String, and Binary
+   (each gets `OK: Event accepted`)
 3. Sends a REQ (subscription request, TransType: All) to subscribe to every type
 4. The server returns stored events as PUSH messages
-5. The client renders each event using its type's delivery method (JSON is parsed and pretty-printed, String is shown as-is, Binary shows size only)
+5. The client renders each event using its type's delivery method
+   (JSON is parsed and pretty-printed, String is shown as-is, Binary shows size only)
 6. Receives the end-of-events notification (`EOE: ...`) and closes the connection
 
 ### 3. Run the sample (no server needed)
@@ -134,7 +133,38 @@ It demonstrates key-pair generation, creating and signing an event,
 encode → decode round-trip, signature verification, and REQ encode / decode —
 all offline.
 
-## Protocol Specification
+---
+
+## Technical specification (for developers)
+
+### Directory layout
+
+```
+Fodpr/
+├── Fodpr.nimble        # Nimble package definition (Library type)
+├── src/
+│   ├── Fodpr.nim       # Library main module (re-exports protocol / crypto)
+│   ├── protocol.nim    # Wire protocol encode / decode
+│   └── crypto.nim      # Bech32 and secp256k1 (keygen, signing, verification)
+├── examples/
+│   ├── fodpr_client.nim    # Sample client that talks to the relay server
+│   └── protocol_demo.nim   # Sample using protocol.nim (no server needed)
+├── LICENSES/           # Third-party library license information
+├── README.md           # 日本語版 README
+├── README.en.md        # English README
+└── data/               # LMDB database (used by the relay server, git-ignored)
+```
+
+The relay server (FodprRelay) is maintained in a separate repository:
+
+```
+FodprRelay/
+├── FodprRelay.nimble   # Nimble package definition (requires "https://github.com/LunaYoineko/Fodpr")
+├── Dockerfile          # Docker image definition for the relay server
+├── docker-compose.yml  # Docker Compose config (port 8000 / data volume)
+└── src/
+    └── server.nim      # Relay server
+```
 
 ### Message types (first byte)
 
@@ -148,12 +178,12 @@ All integers are encoded in **big-endian** byte order.
 
 ### Transmission types (TransType) and delivery methods
 
-Defined as constants in `protocol.nim`. `transType` is a **transmission method**
-("how to send") that each user can pick freely. The server never interprets the
-semantics of `content` (profile / note / media, etc.); it only stores and
-delivers based on the transmission type. All semantic interpretation and profile
-management is the client's responsibility (e.g., if `content` is JSON, the client
-may treat a specific key/value as a profile).
+`transType` is a **transmission method** ("how to send") that the sender picks
+freely. The server never interprets the semantics of `content`
+(profile / note / media, etc.); it only stores and delivers based on the
+transmission type. All semantic interpretation and profile management is the
+client's responsibility (e.g., if `content` is JSON, the client may treat a
+specific key/value as a profile).
 
 | Constant         | Value | Description                                          | Delivery method                                      |
 |------------------|-------|------------------------------------------------------|------------------------------------------------------|
@@ -192,7 +222,7 @@ MsgTypeReq(1) | subIdLen(2) | subId | transType(2) | tagKeyLen(2) | tagKey | tag
 MsgTypePush(1) | subIdLen(2) | subId | EVENT payload
 ```
 
-## Storage (server.nim in FodprRelay)
+### Storage (server.nim in FodprRelay)
 
 The relay server (FodprRelay) persists events in LMDB, split into per-type DBIs
 (in the `./data/` directory, created automatically at startup).
@@ -206,7 +236,7 @@ The relay server (FodprRelay) persists events in LMDB, split into per-type DBIs
 - The server never interprets `content`, so every type is stored by appending under a unique key
 - On shutdown (Ctrl+C) the environment is closed; data survives restarts
 
-## Cryptography (crypto.nim)
+### Cryptography (crypto.nim)
 
 - Key pairs: secp256k1 elliptic curve (`nim-secp256k1`)
 - Hash: SHA-256 (`nimSHA2`)
@@ -219,6 +249,8 @@ let sig = signContent(kp.privateKey, content)  # sign content
 let ok   = verifyContent(kp.publicKey, content, sig)  # verify
 let priv = fsecEncode(kp.privateKey)           # encode as fsec1...
 ```
+
+---
 
 ## License
 

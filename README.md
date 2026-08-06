@@ -2,83 +2,77 @@
 
 **Fully Open Decentralized Protocol**
 
-Fodpr は、Nostrを元にした完全に自由なオープンプロトコルです。
-WebSocket 上で動作する軽量なイベント配信プロトコルであり、
-クライアントは署名付きイベントをリレーサーバーへ投稿し、購読要求（REQ）によって
-条件に一致するイベントをリアルタイムに受信できます。
+Fodpr（ふぉどぷる）は、SNS のような「投稿」を、特定の会社やサービスに依存せずに
+やりとりするための**プロトコル**（通信の約束事）です。投稿（**イベント**）を
+**リレーサーバー**という中継所を通して送受信します。
 
+> 英語版は [README.en.md](README.en.md) をご覧ください。
 > English version is available at [README.en.md](README.en.md)
 
-## 特徴
+---
 
-- **署名付きイベント** — イベントは secp256k1 (ECDSA) で署名され、サーバーが改ざん・偽装を検証します
-- **シンプルなバイナリプロトコル** — 固定サイズ整数（ビッグエンディアン）+ 長さプレフィックス方式
-- **Bech32 エンコード** — 秘密鍵は `fsec1...`、公開鍵は `fpub1...` 形式でやり取り可能
-- **LMDB による永続ストレージ** — 受信したイベントは送信タイプ（JSON / String / Binary）ごとの DBI に分けて保存され、再起動後も保持されます（リレーサーバー側の機能）
-- **送信タイプ (TransType)** — 各ユーザーが JSON / String / Binary の 3 タイプから自由に送信方法を選べます。サーバーは content の意味を解釈せず、送信タイプに基づいて保存・配信するだけです（プロフィール管理などの意味解釈はすべてクライアント側の責務）
-- **独立したリレーサーバー (FodprRelay)** — リレーサーバーは別リポジトリ [FodprRelay](https://github.com/LunaYoineko/FodprRelay) として管理しています（Docker 対応・安全な終了対応）
+## Fodpr でできること
 
-## ディレクトリ構成
+- **だれもが自由に使える**
+  オープンなルールで動くため、特定の企業やサービスに縛られません。
 
-```
-Fodpr/
-├── Fodpr.nimble        # Nimble パッケージ定義（Library 型）
-├── src/
-│   ├── Fodpr.nim       # ライブラリのメインモジュール（protocol / crypto を再エクスポート）
-│   ├── protocol.nim    # ワイヤプロトコルのエンコード / デコード
-│   └── crypto.nim      # Bech32 と secp256k1（鍵生成・署名・検証）
-├── examples/
-│   ├── fodpr_client.nim    # リレーサーバーと通信するクライアントのサンプル
-│   └── protocol_demo.nim   # protocol.nim を使ったサンプル（サーバー不要）
-├── LICENSES/           # サードパーティライブラリのライセンス情報
-├── README.en.md        # 英語版 README
-└── data/               # LMDB データベース（リレーサーバー側で使用・gitignore）
-```
+- **なりすまし・改ざんを防げる**
+  投稿には「電子署名」が付いており、本人が書いたものか、書き換えられていないかを
+  だれでも確認できます。
 
-リレーサーバー (FodprRelay) は別リポジトリで管理しています。構成は以下:
+- **サーバーが 1 台に依存しない**
+  リレーサーバーはだれでも立てられます。ひとつのサーバーが停止しても、
+  ほかのサーバーがあればやりとりは続きます。
 
-```
-FodprRelay/
-├── FodprRelay.nimble   # Nimble パッケージ定義（requires "https://github.com/LunaYoineko/Fodpr"）
-├── Dockerfile          # リレーサーバー用の Docker イメージ定義
-├── docker-compose.yml  # Docker Compose での起動設定（ポート 8000 / データボリューム）
-└── src/
-    └── server.nim      # リレーサーバー
-```
+- **投稿の形式を自由に選べる**
+  投稿の形式は、JSON（構造化データ）/ 文字列 / バイナリ（画像などのデータ）の
+  3 種類から、投稿する人が自由に選べます。
 
-## 必要環境
+## しくみをひとことで
+
+まるで郵便のしくみに似ています。「リレーサーバー」は郵便局、「イベント」は手紙、
+「電子署名」は本人の印鑑のようなものです。
+
+1. **投稿する** — 投稿者が電子署名を付けて投稿をリレーサーバーへ送る
+2. **保存する** — リレーサーバーが署名をチェックして投稿を保管する
+3. **頼む** — 読む人が「この種類の投稿をください」とリレーサーバーへ頼む
+4. **受け取る** — リレーサーバーが該当する投稿をリアルタイムに届ける
+
+## よく出てくる言葉
+
+| 用語             | よみ         | やさしい説明                                       |
+|------------------|--------------|----------------------------------------------------|
+| プロトコル       | ぷろとこる   | コンピューター同士がやりとりするときの「約束事」     |
+| イベント         | いべんと     | 投稿ひとつぶんのデータ                             |
+| リレーサーバー   | りれーさーばー | 投稿を預かって配達する「中継所」                  |
+| クライアント     | くらいあんと | Fodpr を利用するアプリやツール                    |
+| 公開鍵・秘密鍵   | こうかいかぎ・ひみつかぎ | 自分を証明するための「鍵」のペア       |
+| 電子署名         | でんししょめい | 本人だけが作れる「電子サイン」                    |
+| 購読（REQ）      | こうどく     | 「この投稿をください」とリレーサーバーへ頼むこと    |
+
+---
+
+## はじめよう（開発者向け）
+
+### 必要なもの
 
 - [Nim](https://nim-lang.org/) 2.2.10 以上
 - [Nimble](https://github.com/nim-lang/nimble)（依存ライブラリのインストールに使用）
-- リレーサーバーをネイティブ実行する場合は、FodprRelay 側で LMDB のランタイムライブラリ（Debian/Ubuntu では `liblmdb0`）が必要
-- Docker でリレーサーバーを実行する場合は [Docker Engine](https://docs.docker.com/engine/) と [Docker Compose](https://docs.docker.com/compose/)
+- リレーサーバーをネイティブ実行する場合は、FodprRelay 側で LMDB の
+  ランタイムライブラリ（Debian/Ubuntu では `liblmdb0`）が必要
+- Docker でリレーサーバーを実行する場合は
+  [Docker Engine](https://docs.docker.com/engine/) と
+  [Docker Compose](https://docs.docker.com/compose/)
 
-## ビルド方法
+### 手順の全体像
 
-依存ライブラリのインストール:
-
-```bash
-nimble install -d
-```
-
-クライアントのサンプルを実行（リレーサーバー起動中に別ターミナルで）:
-
-```bash
-nim c -r examples/fodpr_client.nim
-```
-
-プロトコルのエンコード / デコードだけを試すサンプル:
-
-```bash
-nim c -r examples/protocol_demo.nim
-```
-
-## 使い方
+1. リレーサーバー（中継所）を起動する
+2. クライアント（投稿・購読ツール）を実行する
 
 ### 1. リレーサーバーを起動（FodprRelay）
 
-リレーサーバーは別リポジトリ [FodprRelay](https://github.com/LunaYoineko/FodprRelay) にあります。
-`git clone` して実行してください:
+リレーサーバーは別リポジトリ [FodprRelay](https://github.com/LunaYoineko/FodprRelay)
+にあります。`git clone` して実行してください。
 
 ```bash
 git clone https://github.com/LunaYoineko/FodprRelay
@@ -86,6 +80,8 @@ cd FodprRelay
 nimble build -y
 ./src/server
 ```
+
+起動すると、次のように表示されます。
 
 ```
 ================================================
@@ -103,10 +99,10 @@ cd FodprRelay
 docker compose up -d --build
 ```
 
-ビルド後、`http://localhost:8000/` へアクセスすると動作確認用の
-テキストが返ります。ログは `docker compose logs -f` で確認できます。
+ビルド後、`http://localhost:8000/` へアクセスすると動作確認用のテキストが返ります。
+ログは `docker compose logs -f` で確認できます。
 
-### 2. クライアントを起動
+### 2. クライアントを実行
 
 別のターミナルで:
 
@@ -114,18 +110,20 @@ docker compose up -d --build
 nim c -r examples/fodpr_client.nim
 ```
 
-クライアントは以下を行います:
+クライアントは以下の流れで動作します。
 
 1. `ws://localhost:8000/` へ接続
-2. 鍵ペアを生成し、JSON・String・Binary の 3 タイプを EVENT として投稿（各 `OK: Event accepted`）
+2. 鍵ペアを生成し、JSON・文字列・バイナリの 3 タイプを EVENT として投稿
+   （各 `OK: Event accepted`）
 3. REQ（購読要求, TransType: All）で全タイプを購読
 4. サーバーが保存済みイベントを PUSH 形式で返却
-5. クライアントは送信タイプごとに適した配信方法で表示（JSON はパースして整形 / String はそのまま / Binary はサイズのみ）
+5. 送信タイプごとに適した配信方法で表示
+   （JSON はパースして整形 / 文字列はそのまま / バイナリはサイズのみ）
 6. 配信終了通知（`EOE: ...`）を受信して接続を閉じる
 
 ### 3. サンプルを実行（サーバー不要）
 
-プロトコルのエンコード / デコードだけを試したい場合は:
+サーバーを立てずに、プロトコルのエンコード / デコードだけを試したい場合は:
 
 ```bash
 nim c -r examples/protocol_demo.nim
@@ -134,7 +132,38 @@ nim c -r examples/protocol_demo.nim
 鍵ペア生成、イベントの作成・署名、エンコード → デコード、署名検証、REQ の
 エンコード / デコードまでをオフラインで確認できます。
 
-## プロトコル仕様
+---
+
+## 開発者向け詳細（技術仕様）
+
+### ディレクトリ構成
+
+```
+Fodpr/
+├── Fodpr.nimble        # Nimble パッケージ定義（Library 型）
+├── src/
+│   ├── Fodpr.nim       # ライブラリのメインモジュール（protocol / crypto を再エクスポート）
+│   ├── protocol.nim    # ワイヤプロトコルのエンコード / デコード
+│   └── crypto.nim      # Bech32 と secp256k1（鍵生成・署名・検証）
+├── examples/
+│   ├── fodpr_client.nim    # リレーサーバーと通信するクライアントのサンプル
+│   └── protocol_demo.nim   # protocol.nim を使ったサンプル（サーバー不要）
+├── LICENSES/           # サードパーティライブラリのライセンス情報
+├── README.md           # 日本語版 README
+├── README.en.md        # 英語版 README
+└── data/               # LMDB データベース（リレーサーバー側で使用・gitignore）
+```
+
+リレーサーバー（FodprRelay）は別リポジトリで管理しています。
+
+```
+FodprRelay/
+├── FodprRelay.nimble   # Nimble パッケージ定義（requires "https://github.com/LunaYoineko/Fodpr"）
+├── Dockerfile          # リレーサーバー用の Docker イメージ定義
+├── docker-compose.yml  # Docker Compose での起動設定（ポート 8000 / データボリューム）
+└── src/
+    └── server.nim      # リレーサーバー
+```
 
 ### メッセージ種別（先頭 1 バイト）
 
@@ -148,11 +177,10 @@ nim c -r examples/protocol_demo.nim
 
 ### 送信タイプ（TransType）と配信方法
 
-`protocol.nim` に定数として定義しています。`transType` は「どのように送るか」を
-表す**送信方法**であり、各ユーザーが自由に選べます。サーバーは content の意味
-（プロフィール / 投稿 / メディア など）を一切解釈せず、送信タイプに基づいて
-保存・配信するだけです。意味の解釈やプロフィール管理はすべてクライアント側の
-責務となります（例: content が JSON なら特定のキー/値でプロフィールと判定する）。
+`transType` は「どのように送るか」を表す**送信方法**であり、投稿する人が
+自由に選べます。サーバーは投稿の中身の意味（プロフィール / 投稿 / メディア など）を
+一切解釈せず、送信タイプに基づいて保存・配信するだけです。意味の解釈は
+すべてクライアント側の役割です（例: JSON なら特定のキー / 値をプロフィールと判定する）。
 
 | 定数              | 値 | 説明                                        | 配信方法                                        |
 |-------------------|----|---------------------------------------------|-------------------------------------------------|
@@ -191,10 +219,10 @@ MsgTypeReq(1) | subIdLen(2) | subId | transType(2) | tagKeyLen(2) | tagKey | tag
 MsgTypePush(1) | subIdLen(2) | subId | EVENT 本体
 ```
 
-## ストレージ（FodprRelay の server.nim）
+### ストレージ（FodprRelay の server.nim）
 
-リレーサーバー (FodprRelay) は、イベントを送信タイプごとの DBI に分けて
-LMDB に永続化します（`./data/` ディレクトリ、起動時に自動作成）。
+リレーサーバー（FodprRelay）は、イベントを送信タイプごとに分けて LMDB に
+永続化します（`./data/` ディレクトリ、起動時に自動作成）。
 
 | DBI         | 保存するイベント | キー                    |
 |-------------|------------------|-------------------------|
@@ -205,7 +233,7 @@ LMDB に永続化します（`./data/` ディレクトリ、起動時に自動�
 - サーバーは content を解釈しないため、どのタイプも一意なキーで追記保存されます
 - サーバー終了時（Ctrl+C）に環境をクローズし、データは再起動後も保持されます
 
-## 暗号仕様（crypto.nim）
+### 暗号仕様（crypto.nim）
 
 - 鍵ペア: secp256k1 楕円曲線（`nim-secp256k1`）
 - ハッシュ: SHA-256（`nimSHA2`）
@@ -218,6 +246,8 @@ let sig = signContent(kp.privateKey, content)  # 署名
 let ok   = verifyContent(kp.publicKey, content, sig)  # 検証
 let priv = fsecEncode(kp.privateKey)           # fsec1... 形式へ変換
 ```
+
+---
 
 ## ライセンス
 
