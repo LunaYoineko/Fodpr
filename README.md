@@ -1,4 +1,4 @@
-# Fodpr
+# Fodpr（ふぉどぷる）
 
 **Fully Open Decentralized Protocol**
 
