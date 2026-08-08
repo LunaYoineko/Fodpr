@@ -28,6 +28,24 @@ sent and received through a **relay server**, a kind of relay station.
   The sender freely picks one of three formats: JSON (structured data),
   String (plain text), or Binary (e.g. image data).
 
+- **Metadata protection (full-event signing)**
+  With a **Signed** event (TransTypeSigned), the timestamp, public key, and
+  tags are signed along with the content, so relays cannot tamper with
+  metadata undetected. The SHA-256 of the signed bytes becomes an
+  **event ID**, allowing a specific event to be referenced uniquely
+  (the basis for mail thread references).
+
+- **Per-recipient encryption (E2EE envelope)**
+  With an **Encrypted** event (TransTypeEncrypted), the content is an
+  **envelope** whose body is AES-256-GCM encrypted and whose key is wrapped
+  per recipient (gift-wrap equivalent). Only the intended recipients can
+  decrypt the body. The relay verifies the structure but cannot read it.
+
+- **Reader authentication (read auth)**
+  Recipient-limited events (`to:<fpub>` tag) are only delivered to
+  subscriptions authenticated as that recipient via a challenge (AUTH,
+  the equivalent of NIP-42).
+
 ## How it works in one glance
 
 Think of it like the postal system: the **relay server** is the post office,
@@ -173,7 +191,9 @@ FodprRelay/
 | 0x01  | EVENT | client → server          | Post a signed event          |
 | 0x02  | REQ   | client → server          | Subscription request         |
 | 0x03  | DEL   | client → server          | Delete-events request (signed)|
+| 0x04  | AUTH  | client → server          | Read-authentication signature response (NIP-42 equivalent) |
 | 0x81  | PUSH  | server → client          | Event delivery               |
+| 0x82  | CHALLENGE | server → client       | Authentication challenge (32-byte nonce) |
 
 All integers are encoded in **big-endian** byte order.
 
@@ -186,12 +206,14 @@ transmission type. All semantic interpretation and profile management is the
 client's responsibility (e.g., if `content` is JSON, the client may treat a
 specific key/value as a profile).
 
-| Constant         | Value | Description                                          | Delivery method                                      |
-|------------------|-------|------------------------------------------------------|------------------------------------------------------|
-| `TransTypeJSON`  | 1     | Structured data (`content` is UTF-8 JSON)            | Server validates JSON syntax on receive; client parses and pretty-prints on receive |
-| `TransTypeString`| 2     | String (`content` is UTF-8)                          | Delivered and displayed as a plain string            |
-| `TransTypeBinary`| 3     | Binary data (`content` is arbitrary bytes)           | Delivered as-is; client shows the size only          |
-| `TransTypeAll`   | 0     | All types (REQ only)                                 | Server delivers stored events of every type          |
+| Constant           | Value | Description                                          | Delivery method                                      |
+|--------------------|-------|------------------------------------------------------|------------------------------------------------------|
+| `TransTypeJSON`    | 1     | Structured data (`content` is UTF-8 JSON)            | Server validates JSON syntax on receive; client parses and pretty-prints on receive |
+| `TransTypeString`  | 2     | String (`content` is UTF-8)                          | Delivered and displayed as a plain string            |
+| `TransTypeBinary`  | 3     | Binary data (`content` is arbitrary bytes)           | Delivered as-is; client shows the size only          |
+| `TransTypeSigned`  | 4     | Full-event signing (`content` is arbitrary)          | All fields are signed; SHA-256 of the signed bytes is the event ID |
+| `TransTypeEncrypted` | 5   | Encrypted event (`content` is an envelope)          | `content` is a per-recipient envelope from `envelope.nim`. Validates full signature + `to:` tag match |
+| `TransTypeAll`     | 0     | All types (REQ only)                                 | Server delivers stored events of every type          |
 
 ### EVENT binary layout
 
@@ -200,12 +222,101 @@ transType(2) | createdAt(8) | pubkey(33) | tagCount(2)
 | (tagLen(2) | tag) × tagCount | contentLen(4) | content | signature(64)
 ```
 
-- `transType` — transmission type (uint16: 1 = JSON, 2 = String, 3 = Binary)
+- `transType` — transmission type (uint16: 0=All (REQ only), 1=JSON, 2=String, 3=Binary, 4=Signed, 5=Encrypted)
 - `createdAt` — Unix timestamp in seconds (uint64)
 - `pubkey` — sender's public key (compressed, 33 bytes)
 - `tags` — list of tag strings
-- `content` — body (JSON, string, or binary depending on the type)
-- `signature` — ECDSA signature over the SHA-256 digest of `content` (64 bytes)
+- `content` — body (JSON, string, binary, or envelope depending on the type)
+- `signature` — ECDSA signature (64 bytes)
+  - TransType 1–3 (JSON / String / Binary): over the SHA-256 digest of `content`
+  - TransType 4–5 (Signed / Encrypted): over **all fields** including `createdAt`,
+    `pubkey`, and `tags` (the bytes from `encodeEventSignedData()`)
+
+### Full-event signing (TransTypeSigned) and event ID
+
+`TransTypeSigned` signs every field except `signature` itself
+(`transType | createdAt | pubkey | tags | content`). The **SHA-256** of these
+signed bytes (`encodeEventSignedData(ev)`) is the **event ID** (`eventId`).
+
+```nim
+let evId = eventIdHex(ev)      # 64-hex-digit string
+let ok   = verifyEvent(ev.pubkey, ev, ev.signature)  # verify full-event signature
+```
+
+Event IDs can be referenced through the `e:<eventId>` tag, so
+**reply-to / thread references** can be expressed precisely.
+
+### Per-recipient encryption (TransTypeEncrypted) and the envelope
+
+The `content` of `TransTypeEncrypted` is a **per-recipient encrypted envelope**
+(gift-wrap / seal equivalent) built by `envelope.nim`.
+
+Envelope layout (all big-endian):
+
+```
+version(1) | recipientCount(2) |
+(recipientPubkey(33) | wrapNonce(12) | wrappedKey(32) | wrappedKeyTag(16)) × recipientCount |
+bodyNonce(12) | bodyTag(16) | bodyCiphertext
+```
+
+Key scheme:
+
+- A message key **K** (32 random bytes) AES-256-GCM encrypts the body
+- K is wrapped for each recipient with a wrapping key **W** derived from ECDH
+  - `W = SHA-256(ECDH(senderPriv, recipientPub) || "FodprEnvelopeV1" || recipientPub)`
+- A recipient recomputes the same W from `ECDH(theirPriv, senderPub)`, unwraps K,
+  and decrypts the body
+
+```nim
+# sender: encrypt for multiple recipients
+let envelope = encryptEnvelope(body, senderPriv, @[recip1.publicKey, recip2.publicKey])
+# recipient: decrypt with your private key and the event's pubkey (the sender)
+let body = decryptEnvelope(ev.content, myPriv, ev.pubkey)
+```
+
+Relay-side API (structure-only; no decryption):
+
+```nim
+let ok     = isValidEnvelope(ev.content)         # structure validation
+let recips = envelopeRecipients(ev.content)      # recipient public keys (matched against `to:` tags)
+```
+
+An Encrypted event requires at least one `to:<fpub>` tag, and the relay verifies
+that the tags match the recipients inside the envelope (preventing delivery to
+someone not on the recipient list).
+
+### Read authentication (AUTH, NIP-42 equivalent)
+
+`to:<fpub>` recipient-limited events require the recipient to authenticate so
+only that person can receive them. The relay runs a **challenge → signed
+response** flow.
+
+```
+1. client   → REQ(subId, tagKey="to", tagVal=fpub)
+2. server   → CHALLENGE (0x82) with nonce(32)
+3. client   → AUTH (0x04): nonce(32) | pubkey(33) | signature(64)
+   (the signed bytes are: nonce | pubkey)
+4. server   → after verification, resumes the REQ for that recipient
+```
+
+```nim
+var auth = FodprAuth(nonce: nonce, pubkey: kp.publicKey, signature: placeholder)
+auth.signature = signContent(kp.privateKey, encodeAuthSignedData(auth))
+await ws.send(encodeAuth(auth), Binary)
+```
+
+Only subscriptions that pass authentication receive `to:` recipient-limited
+events. Public events remain available without authentication.
+
+### Tag conventions
+
+Tags are strings in `"<key>:<value>"` form.
+
+| Tag           | Description                                        |
+|---------------|----------------------------------------------------|
+| `to:<fpub>`   | Recipient's public key (fpub form, lowercase). Required for recipient-limited events |
+| `p:<fpub>`    | Participant's public key (for reference)           |
+| `e:<eventId>` | Referenced event (used for reply-to / thread linking) |
 
 ### REQ binary layout
 
@@ -214,8 +325,8 @@ MsgTypeReq(1) | subIdLen(2) | subId | transType(2) | tagKeyLen(2) | tagKey | tag
 ```
 
 - `transType` of `0` (`TransTypeAll`) subscribes to every type
-- `transType` of `1` / `2` / `3` subscribes to the matching type (JSON / String / Binary)
-- `tagKey` / `tagVal` filter events by tag (currently `tagKey = "pubkey"` filters by public key; empty string means no filter)
+- `transType` of `1` through `5` subscribes to the matching type (JSON / String / Binary / Signed / Encrypted)
+- `tagKey` / `tagVal` filter events by tag (`tagKey = "pubkey"` filters by public key, `tagKey = "to"` filters by recipient)
 
 ### PUSH binary layout
 
@@ -230,19 +341,20 @@ Authors can delete their own events. Because the whole request is signed,
 
 ```
 MsgTypeDel(1) | transType(2) | targetType(1) | pubkey(33)
-| [createdAt(8) | contentHash(32)] | signature(64)
+| [createdAt(8) | contentHash(32)] | [eventId(32)] | signature(64)
 ```
 
 **Signed data** (the bytes below, excluding `signature`):
 
 ```
-transType(2) | targetType(1) | pubkey(33) | [createdAt(8) | contentHash(32)]
+transType(2) | targetType(1) | pubkey(33) | [createdAt(8) | contentHash(32)] | [eventId(32)]
 ```
 
-- `transType` — transmission type of the events to delete (`0` = all, `1` = JSON, `2` = String, `3` = Binary)
+- `transType` — transmission type of the events to delete (`0` = all, `1` = JSON, `2` = String, `3` = Binary, `4` = Signed, `5` = Encrypted)
 - `targetType` — how to select the target events
   - `0` (`DelTargetPubkey`): delete all events of that public key within the given `transType`
   - `1` (`DelTargetEvent`): delete the specific event whose `createdAt` and `contentHash` (SHA-256 of `content`) match
+  - `2` (`DelTargetEventId`): delete the specific event whose `eventId` matches (recommended for full-event-signed events)
 - `pubkey` — public key of the events to delete (your own public key only)
 - `signature` — ECDSA signature (64 bytes) over the signed data above, made with the author's private key
 
@@ -282,6 +394,8 @@ The relay server (FodprRelay) persists events in LMDB, split into per-type DBIs
 | `json`      | TransTypeJSON    | Current time + random  |
 | `string`    | TransTypeString  | Current time + random  |
 | `binary`    | TransTypeBinary  | Current time + random  |
+| `signed`    | TransTypeSigned  | Current time + random  |
+| `encrypted` | TransTypeEncrypted | Current time + random |
 
 - The server never interprets `content`, so every type is stored by appending under a unique key
 - On shutdown (Ctrl+C) the environment is closed; data survives restarts

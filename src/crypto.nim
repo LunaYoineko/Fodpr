@@ -185,17 +185,26 @@ proc parseSignature*(bytes: openArray[byte]): SkSignature =
     raise newException(ValueError, "Invalid signature bytes: " & $parsed.error)
   return parsed.get()
 
-# コンテンツ文字列を SHA-256 でハッシュし、秘密鍵で ECDSA 署名を生成する。
+# 任意のバイト列を SHA-256 でハッシュし、秘密鍵で ECDSA 署名を生成する。
 # secp256k1 の sign は 32 バイトのダイジェスト (SkMessage) を必要とする。
-proc signContent*(priv: SkSecretKey, content: string): FodprSignature =
-  # ① 内容を SHA-256 で 32 バイトのダイジェストに変換
+# content だけでなく、イベント全体の署名 (全体署名) にも使える汎用版。
+proc signBytes*(priv: SkSecretKey, data: string): FodprSignature =
+  # ① 対象バイト列を SHA-256 で 32 バイトのダイジェストに変換
   #    (SHA256Digest は array[32, byte] なので SkMessage に直接変換できる)
-  let msg = SkMessage(computeSHA256(content))
+  let msg = SkMessage(computeSHA256(data))
   # ② ECDSA で署名を生成
   result = FodprSignature(sig: priv.sign(msg))
 
-# 公開鍵を使い、コンテンツに対する署名が正しいかどうかを検証する。
+# 公開鍵を使い、対象バイト列に対する署名が正しいかどうかを検証する。
 # 署名時に使ったのと同じハッシュ化を行い、一致すれば true を返す。
-proc verifyContent*(pub: SkPublicKey, content: string, sig: FodprSignature): bool =
-  let msg = SkMessage(computeSHA256(content))
+proc verifyBytes*(pub: SkPublicKey, data: string, sig: FodprSignature): bool =
+  let msg = SkMessage(computeSHA256(data))
   return sig.sig.verify(msg, pub)
+
+# コンテンツ文字列に対する署名 (後方互換のため従来どおり content のみ署名)。
+proc signContent*(priv: SkSecretKey, content: string): FodprSignature =
+  signBytes(priv, content)
+
+# コンテンツ文字列に対する署名の検証 (後方互換)。
+proc verifyContent*(pub: SkPublicKey, content: string, sig: FodprSignature): bool =
+  verifyBytes(pub, content, sig)

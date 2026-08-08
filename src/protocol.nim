@@ -24,20 +24,26 @@
 ##   - TransTypeString (2): content は UTF-8 の文字列。そのまま文字列として配信・表示する。
 ##   - TransTypeBinary (3): content は任意のバイト列。バイナリフレームのまま配信し、
 ##                          クライアントはサイズのみ表示する（そのまま文字列化しない）。
-##   - TransTypeAll    (0): イベント側では使用しない。REQ でのみ「すべての送信方法を
-##                          購読する」ことを表す。
+  ##   - TransTypeAll    (0): イベント側では使用しない。REQ でのみ「すべての送信方法を
+  ##                          購読する」ことを表す。
+  ##   - TransTypeSigned (4): 全体署名イベント。createdAt / pubkey / tags を含む
+  ##                          全フィールドを署名対象とし、署名対象バイト列の SHA-256 を
+  ##                          イベントID として使う（メール用途の拡張）。
 
-import streams, endians
+import streams, endians, strutils
 import crypto, secp256k1
+import nimSHA2
 
 # メッセージ種別を表す定数。
-# 0x01 / 0x02 はクライアント → サーバー、
-# 0x81 はサーバー → クライアントの配信を表す。
+# 0x01〜0x04 はクライアント → サーバー、
+# 0x81〜0x82 はサーバー → クライアントの配信を表す。
 const
   MsgTypeEvent* = char(0x01)   # イベント投稿
   MsgTypeReq*   = char(0x02)   # 購読要求
   MsgTypeDel*   = char(0x03)   # イベント削除要求 (クライアント → サーバー)
+  MsgTypeAuth*  = char(0x04)   # 認証応答 (クライアント → サーバー, NIP-42 相当)
   MsgTypePush*  = char(0x81)   # イベント配信
+  MsgTypeChallenge* = char(0x82) # 認証チャレンジ (サーバー → クライアント)
   
   # 送信タイプ (TransType)。
   # イベントの content を「どのように送るか」を表す。各ユーザーが自由に選べる。
@@ -45,10 +51,22 @@ const
   TransTypeJSON*   = 1.uint16   # JSON として送信（content は UTF-8 の JSON）
   TransTypeString* = 2.uint16   # 文字列として送信（content は UTF-8）
   TransTypeBinary* = 3.uint16   # バイナリとして送信（content は任意のバイト列）
+  TransTypeSigned* = 4.uint16   # 拡張イベント（全体署名）。
+                                # createdAt / pubkey / tags を含む全フィールドに署名する。
+                                # 署名対象は encodeEventSignedData() のバイト列で、
+                                # その SHA-256 がイベントID (eventId) になる。
+                                # メール用途のメタデータ完全性やスレッド参照 (reply-to) の土台。
+                                # (既存 1〜3 は content のみ署名のため後方互換で維持)
+  TransTypeEncrypted* = 5.uint16 # 暗号化イベント。content は envelope.nim の
+                                 # エンベロープ (宛先別暗号化, gift-wrap 相当)。
+                                 # 全体署名 (TransTypeSigned と同じ検証) を使い、
+                                 # to:<fpub> タグがエンベロープ内の受信者と一致する必要がある。
+                                 # サーバーは構造のみ検証し、内容は復号しない。
 
   # 削除要求 (DEL) の削除対象タイプ。
   DelTargetPubkey* = 0.uint8   # 公開鍵単位で削除 (その送信者のイベントを全削除)
   DelTargetEvent*  = 1.uint8   # 特定イベントを削除 (createdAt + contentハッシュで特定)
+  DelTargetEventId* = 2.uint8  # 特定イベントを削除 (eventId で特定。全体署名イベント推奨)
 
 type
   # 投稿されるイベント本体。
@@ -77,20 +95,34 @@ type
   # 一致するものだけを削除する。
   FodprDelReq* = object
     transType*  : uint16            # 削除対象の送信タイプ (TransTypeAll=0 は全タイプ)
-    targetType* : uint8             # DelTargetPubkey / DelTargetEvent
-    pubkey*     : SkPublicKey       # 削除対象イベントの公開鍵
+    targetType* : uint8             # DelTargetPubkey / DelTargetEvent / DelTargetEventId
+    pubkey*     : SkPublicKey       # 削除対象イベントの公開鍵 (要求の署名鍵でもある)
     createdAt*  : uint64            # DelTargetEvent のときのみ有効
     contentHash*: array[32, byte]   # DelTargetEvent のときのみ有効 (content の SHA-256)
+    eventId*    : array[32, byte]   # DelTargetEventId のときのみ有効 (イベントID)
     signature*  : FodprSignature    # 上記フィールド全体に対する署名
+
+  # 認証応答 (AUTH)。NIP-42 相当の読取認証。
+  # サーバーから送られたチャレンジ nonce に署名して返す。
+  # 署名対象バイト列: nonce(32) | pubkey(33)
+  FodprAuth* = object
+    nonce*     : array[32, byte]    # サーバーから受け取ったチャレンジ nonce
+    pubkey*    : SkPublicKey        # 認証する公開鍵
+    signature* : FodprSignature     # nonce(32) | pubkey(33) に対する署名
 
 # ---------------------------------------------------------------------------
 # EVENT のエンコード
 # ---------------------------------------------------------------------------
 
-# イベントを以下のバイナリ形式にエンコードする:
+# イベントの署名対象バイト列（signature を除く全フィールド）をエンコードする:
 #   transType(2) | createdAt(8) | pubkey(33) | tagCount(2) |
-#   (tagLen(2) | tag) * tagCount | contentLen(4) | content | signature(64)
-proc encodeEvent*(ev: FodprEvent): string =
+#   (tagLen(2) | tag) * tagCount | contentLen(4) | content
+#
+# 用途:
+#   - TransTypeSigned (全体署名) の署名対象
+#   - イベントID (eventId) の算出対象 (このバイト列の SHA-256)
+# encodeEvent はこの結果に signature を連結するだけなので、ワイヤ形式は不変。
+proc encodeEventSignedData*(ev: FodprEvent): string =
   result = ""
 
   # transType (uint16, ビッグエンディアン)
@@ -141,9 +173,38 @@ proc encodeEvent*(ev: FodprEvent): string =
   for b in clBytes: result.add(char(b))
   result.add(ev.content)
 
+# イベントをワイヤ形式にエンコードする:
+#   encodeEventSignedData の結果に signature(64) を連結したもの。
+proc encodeEvent*(ev: FodprEvent): string =
+  result = encodeEventSignedData(ev)
+
   # signature（compact 形式 64 バイト）
   let sigRaw = ev.signature.sig.toRaw()
   for b in sigRaw: result.add(char(b))
+
+# ---------------------------------------------------------------------------
+# イベントID と全体署名 (TransTypeSigned)
+# ---------------------------------------------------------------------------
+# イベントID は署名対象バイト列 (encodeEventSignedData) の SHA-256。
+# 全フィールドに紐づくため、メタデータ改ざんの検出と、
+# 特定イベントへの参照 (reply-to の "e:<eventid>") に使える。
+proc eventId*(ev: FodprEvent): array[32, byte] =
+  result = array[32, byte](computeSHA256(encodeEventSignedData(ev)))
+
+# イベントID の 16 進文字列表現。タグ "e:<eventid>" などに使いやすい。
+proc eventIdHex*(ev: FodprEvent): string =
+  result = ""
+  for b in eventId(ev): result.add(b.toHex(2))
+
+# イベント全体 (transType / createdAt / pubkey / tags / content) に対する署名。
+# content のみ署名する signContent と違い、メタデータの改ざんも検出できる。
+# エンコード前に ev.signature は空のまま呼ぶこと (署名対象に署名自体を含めない)。
+proc signEvent*(priv: SkSecretKey, ev: FodprEvent): FodprSignature =
+  signBytes(priv, encodeEventSignedData(ev))
+
+# signEvent の検証。正しければ true を返す。
+proc verifyEvent*(pub: SkPublicKey, ev: FodprEvent, sig: FodprSignature): bool =
+  verifyBytes(pub, encodeEventSignedData(ev), sig)
 
 # ---------------------------------------------------------------------------
 # EVENT のデコード
@@ -292,21 +353,26 @@ proc decodeReq*(stream: Stream): FodprReq =
 # ---------------------------------------------------------------------------
 # パケット形式 (クライアント → サーバー):
 #   msgType(1) | transType(2) | targetType(1) | pubkey(33) |
-#   [createdAt(8) | contentHash(32)] | signature(64)
+#   [createdAt(8) | contentHash(32)]  ← DelTargetEvent の場合
+#   [eventId(32)]                     ← DelTargetEventId の場合
+#   | signature(64)
 #
 # 署名対象 (transType 以降、signature を除いたバイト列):
-#   transType(2) | targetType(1) | pubkey(33) | [createdAt(8) | contentHash(32)]
+#   transType(2) | targetType(1) | pubkey(33) | 上記の識別子部分
 # 署名は送信者本人の秘密鍵で行い、サーバーは要求内の pubkey で検証する。
 # これにより「自分の投稿だけを自分が消せる」ことを保証する。
 #
 # targetType による削除対象の違い:
-#   DelTargetPubkey(0) : その pubkey のイベントを transType 単位で全削除
-#   DelTargetEvent(1)  : createdAt と contentHash が一致する特定イベントを削除
+#   DelTargetPubkey(0)  : その pubkey のイベントを transType 単位で全削除
+#   DelTargetEvent(1)   : createdAt と contentHash が一致する特定イベントを削除
+#   DelTargetEventId(2) : eventId が一致する特定イベントを削除。
+#                         (eventId は署名対象バイト列全体の SHA-256 なので、
+#                          TransTypeSigned のメタデータ改ざん耐性に適合する)
 
 # 署名対象のバイト列を作成する。クライアント側とサーバー側で
 # バイト列を完全に一致させる必要がある。
 proc encodeDelSignedData*(req: FodprDelReq): string =
-  # transType(2) | targetType(1) | pubkey(33) | [createdAt(8) | contentHash(32)]
+  # transType(2) | targetType(1) | pubkey(33) | [識別子部分]
   var ttNet: uint16
   bigEndian16(addr ttNet, unsafeAddr req.transType)
   var ttBytes: array[2, byte]
@@ -323,6 +389,8 @@ proc encodeDelSignedData*(req: FodprDelReq): string =
     copyMem(addr caBytes[0], addr caNet, 8)
     for b in caBytes: result.add(char(b))
     for b in req.contentHash: result.add(char(b))
+  elif req.targetType == DelTargetEventId:
+    for b in req.eventId: result.add(char(b))
 
 # 削除要求全体をワイヤ形式にエンコードする (クライアント用)。
 # 署名済みの FodprDelReq を渡すと、先頭に msgType(0x03) を付与し、
@@ -350,10 +418,12 @@ proc decodeDelReq*(stream: Stream): FodprDelReq =
   for i in 0..<33: pubArr[i] = byte(pubBytes[i])
   let pubkey = parsePublicKey(pubArr)
 
-  # 特定イベント削除の場合のみ createdAt と contentHash を読む
+  # targetType に応じた識別子部分を読む
   var createdAt: uint64
   var contentHash: array[32, byte]
-  if byte(tgtByte) == DelTargetEvent:
+  var eventId: array[32, byte]
+  case byte(tgtByte)
+  of DelTargetEvent:
     let caBytes = stream.readStr(8)
     var caNet, caVal: uint64
     copyMem(addr caNet, unsafeAddr caBytes[0], 8)
@@ -361,6 +431,11 @@ proc decodeDelReq*(stream: Stream): FodprDelReq =
     createdAt = caVal
     let hashBytes = stream.readStr(32)
     for i in 0..<32: contentHash[i] = byte(hashBytes[i])
+  of DelTargetEventId:
+    let idBytes = stream.readStr(32)
+    for i in 0..<32: eventId[i] = byte(idBytes[i])
+  else:
+    discard  # DelTargetPubkey は識別子部分なし
 
   # signature (compact 形式 64 バイト)
   let sigBytes = stream.readStr(64)
@@ -374,8 +449,67 @@ proc decodeDelReq*(stream: Stream): FodprDelReq =
     pubkey: pubkey,
     createdAt: createdAt,
     contentHash: contentHash,
+    eventId: eventId,
     signature: signature
   )
+
+# ---------------------------------------------------------------------------
+# AUTH (認証) のエンコード・デコード (NIP-42 相当)
+# ---------------------------------------------------------------------------
+# パケット形式 (サーバー → クライアント):
+#   MsgTypeChallenge(1) | nonce(32)
+#
+# パケット形式 (クライアント → サーバー):
+#   MsgTypeAuth(1) | nonce(32) | pubkey(33) | signature(64)
+#
+# 署名対象バイト列 (クライアント側とサーバー側で完全一致させる):
+#   nonce(32) | pubkey(33)
+# 署名は signContent(秘密鍵, 署名対象バイト列) で生成し、
+# サーバーは verifyContent(pubkey, 署名対象バイト列, signature) で検証する。
+# nonce はサーバーが発行したものと一致し、かつ期限内である必要がある。
+# これにより「その鍵の持ち主であること」の証明になる。
+
+# チャレンジパケットを生成する (サーバー用)。
+# 引数の nonce は 32 バイトの暗号学的乱数。
+proc encodeChallenge*(nonce: array[32, byte]): string =
+  result = $MsgTypeChallenge
+  for b in nonce: result.add(char(b))
+
+# AUTH の署名対象バイト列 (nonce | pubkey) を作成する。
+# クライアントはこのバイト列を signContent で署名し、サーバーは検証する。
+proc encodeAuthSignedData*(auth: FodprAuth): string =
+  for b in auth.nonce: result.add(char(b))
+  let pubRaw = auth.pubkey.toRawCompressed()
+  for b in pubRaw: result.add(char(b))
+
+# 認証応答パケットをワイヤ形式にエンコードする (クライアント用)。
+# あらかじめ auth.signature に encodeAuthSignedData の署名を入れておくこと。
+proc encodeAuth*(auth: FodprAuth): string =
+  result = $MsgTypeAuth
+  result.add(encodeAuthSignedData(auth))
+  let sigRaw = auth.signature.sig.toRaw()
+  for b in sigRaw: result.add(char(b))
+
+# encodeAuth とは逆に、ストリームから認証応答を復元する (サーバー用)。
+proc decodeAuth*(stream: Stream): FodprAuth =
+  # nonce (32 バイト)
+  let nonceBytes = stream.readStr(32)
+  var nonce: array[32, byte]
+  for i in 0..<32: nonce[i] = byte(nonceBytes[i])
+
+  # pubkey (圧縮形式 33 バイト)
+  let pubBytes = stream.readStr(33)
+  var pubArr: array[33, byte]
+  for i in 0..<33: pubArr[i] = byte(pubBytes[i])
+  let pubkey = parsePublicKey(pubArr)
+
+  # signature (compact 形式 64 バイト)
+  let sigBytes = stream.readStr(64)
+  var sigArr: array[64, byte]
+  for i in 0..<64: sigArr[i] = byte(sigBytes[i])
+  let signature = FodprSignature(sig: parseSignature(sigArr))
+
+  result = FodprAuth(nonce: nonce, pubkey: pubkey, signature: signature)
 
 # 送信タイプの数値から表示用の名前を返す。
 # ログ出力やクライアントでの配信方法の判別表示に使う。
@@ -385,4 +519,6 @@ proc transTypeName*(transType: uint16): string =
   of TransTypeJSON:   "JSON"
   of TransTypeString: "String"
   of TransTypeBinary: "Binary"
+  of TransTypeSigned: "Signed"
+  of TransTypeEncrypted: "Encrypted"
   else: "Unknown(" & $transType & ")"

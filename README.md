@@ -28,6 +28,22 @@ Fodpr（ふぉどぷる）は、SNS のような「投稿」を、特定の会�
   投稿の形式は、JSON（構造化データ）/ 文字列 / バイナリ（画像などのデータ）の
   3 種類から、投稿する人が自由に選べます。
 
+- **メタデータまで守れる（全体署名）**
+  「全体署名」イベント（TransTypeSigned）を使うと、本文だけでなく
+  送信日時・公開鍵・タグも含めて署名できます。リレーによる
+  メタデータの改ざんを検出でき、イベント ID で特定イベントを
+  一意に参照できます（メールのスレッド参照などの土台）。
+
+- **宛先別に暗号化できる（E2EE エンベロープ）**
+  暗号化イベント（TransTypeEncrypted）は、本文を AES-256-GCM で暗号化した
+  「エンベロープ」を content に載せます。受信者ごとに鍵をラップするので、
+  宛先にした本人だけが本文を復号できます（gift-wrap 相当）。
+  リレーは構造だけを検証し、内容は復号できません。
+
+- **読む人を認証できる（読取認証）**
+  宛先限定イベント（`to:<fpub>` タグ）は、その宛先本人として
+  チャレンジ認証（NIP-42 相当の AUTH）を通した購読にだけ配信されます。
+
 ## しくみをひとことで
 
 まるで郵便のしくみに似ています。「リレーサーバー」は郵便局、「イベント」は手紙、
@@ -142,9 +158,10 @@ nim c -r examples/protocol_demo.nim
 Fodpr/
 ├── Fodpr.nimble        # Nimble パッケージ定義（Library 型）
 ├── src/
-│   ├── Fodpr.nim       # ライブラリのメインモジュール（protocol / crypto を再エクスポート）
-│   ├── protocol.nim    # ワイヤプロトコルのエンコード / デコード
-│   └── crypto.nim      # Bech32 と secp256k1（鍵生成・署名・検証）
+│   ├── Fodpr.nim       # ライブラリのメインモジュール（protocol / crypto / envelope を再エクスポート）
+│   ├── protocol.nim    # ワイヤプロトコルのエンコード / デコード（EVENT / REQ / DEL / AUTH）
+│   ├── crypto.nim      # Bech32 と secp256k1（鍵生成・署名・検証・ECDH）
+│   └── envelope.nim    # 宛先別暗号化エンベロープ（TransTypeEncrypted）
 ├── examples/
 │   ├── fodpr_client.nim    # リレーサーバーと通信するクライアントのサンプル
 │   └── protocol_demo.nim   # protocol.nim を使ったサンプル（サーバー不要）
@@ -172,7 +189,9 @@ FodprRelay/
 | 0x01 | EVENT | クライアント → サーバー | 署名付きイベントの投稿     |
 | 0x02 | REQ   | クライアント → サーバー | サブスクリプション要求     |
 | 0x03 | DEL   | クライアント → サーバー | イベント削除要求（署名付き）|
+| 0x04 | AUTH  | クライアント → サーバー | 読取認証の署名応答（NIP-42 相当）|
 | 0x81 | PUSH  | サーバー → クライアント | イベント配信               |
+| 0x82 | CHALLENGE | サーバー → クライアント | 認証チャレンジ（nonce 32 バイト）|
 
 数値はすべて **ビッグエンディアン** でエンコードされます。
 
@@ -188,6 +207,8 @@ FodprRelay/
 | `TransTypeJSON`   | 1  | JSON 構造化データ（content は UTF-8 の JSON） | サーバーが受信時に JSON 構文を検証。クライアントは受信後に JSON としてパースし整形表示 |
 | `TransTypeString` | 2  | 文字列（content は UTF-8）                   | そのまま文字列として配信・表示                   |
 | `TransTypeBinary` | 3  | バイナリデータ（content は任意のバイト列）    | バイナリのまま配信。クライアントはサイズのみ表示 |
+| `TransTypeSigned` | 4  | 全体署名イベント（content は任意）           | 本文だけでなく全フィールドを署名。その SHA-256 がイベント ID になる |
+| `TransTypeEncrypted` | 5  | 暗号化イベント（content はエンベロープ）    | content は envelope.nim の宛先別暗号化エンベロープ。全体署名 + to: タグ一致を検証 |
 | `TransTypeAll`    | 0  | すべてのタイプ（REQ でのみ使用）             | サーバーが全タイプの保存イベントを配信           |
 
 ### EVENT のバイナリ形式
@@ -197,12 +218,99 @@ transType(2) | createdAt(8) | pubkey(33) | tagCount(2)
 | (tagLen(2) | tag) × tagCount | contentLen(4) | content | signature(64)
 ```
 
-- `transType` — 送信タイプ（uint16: 1 = JSON, 2 = String, 3 = Binary）
+- `transType` — 送信タイプ（uint16: 0=All(REQ のみ), 1=JSON, 2=String, 3=Binary, 4=Signed, 5=Encrypted）
 - `createdAt` — Unix タイムスタンプ（秒, uint64）
 - `pubkey` — 送信者の公開鍵（圧縮形式 33 バイト）
 - `tags` — タグ文字列のリスト
-- `content` — 本文（タイプに応じて JSON / 文字列 / バイナリ）
-- `signature` — content の SHA-256 ダイジェストに対する ECDSA 署名（64 バイト）
+- `content` — 本文（タイプに応じて JSON / 文字列 / バイナリ / エンベロープ）
+- `signature` — 署名（64 バイト）。
+  - TransType 1〜3（JSON / String / Binary）: content の SHA-256 ダイジェストに対する ECDSA 署名
+  - TransType 4・5（Signed / Encrypted）: `createdAt`・`pubkey`・`tags` を含む
+    **全フィールド**（`encodeEventSignedData()` のバイト列）に対する署名
+
+### 全体署名（TransTypeSigned）とイベント ID
+
+`TransTypeSigned` は、`signature` を除いた全フィールド
+（`transType | createdAt | pubkey | tags | content`）を署名対象とします。
+署名対象バイト列（`encodeEventSignedData(ev)`）の **SHA-256** が
+**イベント ID**（`eventId`）になります。
+
+```nim
+let evId = eventIdHex(ev)      # 64 桁の 16 進文字列
+let ok   = verifyEvent(ev.pubkey, ev, ev.signature)  # 全体署名の検証
+```
+
+イベント ID はタグ規約の `e:<eventId>` で参照できるため、
+**reply-to（スレッド参照）** を厳密に表現できます。
+
+### 宛先別暗号化（TransTypeEncrypted）とエンベロープ
+
+`TransTypeEncrypted` の `content` は `envelope.nim` が作る
+**宛先別暗号化エンベロープ**（gift-wrap / seal 相当）です。
+
+エンベロープの形式（すべてビッグエンディアン）:
+
+```
+version(1) | recipientCount(2) |
+(recipientPubkey(33) | wrapNonce(12) | wrappedKey(32) | wrappedKeyTag(16)) × recipientCount |
+bodyNonce(12) | bodyTag(16) | bodyCiphertext
+```
+
+鍵スキーム:
+
+- メッセージ鍵 **K**（32 バイトの乱数）で本文（body）を **AES-256-GCM** 暗号化
+- K を各受信者向けに、ECDH 共有鍵から導出したラップ鍵 **W** でラップ
+  - `W = SHA-256(ECDH(送信者秘密鍵, 受信者公開鍵) || "FodprEnvelopeV1" || 受信者公開鍵)`
+- 受信者は `ECDH(自分の秘密鍵, 送信者の公開鍵)` で同じ W を復元し、K を取り出して本文を復号
+
+```nim
+# 送信者: 複数受信者へ暗号化
+let envelope = encryptEnvelope(body, senderPriv, @[recip1.publicKey, recip2.publicKey])
+# 受信者: 自分の秘密鍵とイベントの pubkey (送信者) で復号
+let body = decryptEnvelope(ev.content, myPriv, ev.pubkey)
+```
+
+リレー用 API（内容は復号せず構造だけを見る）:
+
+```nim
+let ok     = isValidEnvelope(ev.content)         # 構造検証
+let recips = envelopeRecipients(ev.content)      # 受信者の公開鍵一覧 (to: タグと突合)
+```
+
+暗号化イベントには `to:<fpub>` タグが必須で、リレーはタグがエンベロープ内の
+受信者と一致することを検証します（「読めない人への配送」を防ぐ）。
+
+### 読取認証（AUTH, NIP-42 相当）
+
+`to:<fpub>` 宛先限定イベントは、宛先本人しか受け取れないようにするため、
+リレーが **チャレンジ → 署名応答** の認証を行います。
+
+```
+1. クライアント → REQ(subId, tagKey="to", tagVal=fpub)
+2. サーバー   → チャレンジ (0x82) nonce(32) を送る
+3. クライアント → AUTH (0x04) nonce(32) | pubkey(33) | signature(64)
+   (署名対象: nonce | pubkey)
+4. サーバー   → 認証OK 後、宛先本人として REQ を再開
+```
+
+```nim
+var auth = FodprAuth(nonce: nonce, pubkey: kp.publicKey, signature: placeholder)
+auth.signature = signContent(kp.privateKey, encodeAuthSignedData(auth))
+await ws.send(encodeAuth(auth), Binary)
+```
+
+認証に成功した購読だけが `to:` 宛先限定イベントを受け取れます
+（公開イベントは従来どおり認証なしで購読できます）。
+
+### タグ規約
+
+Fodpr のタグは `"<キー>:<値>"` 形式の文字列です。
+
+| タグ          | 説明                                        |
+|---------------|---------------------------------------------|
+| `to:<fpub>`   | 宛先の公開鍵（fpub 形式、小文字）。宛先限定イベントで必須 |
+| `p:<fpub>`    | 関係者（participant）の公開鍵（参照用）      |
+| `e:<eventId>` | 参照イベント（reply-to / スレッド結合に使用）|
 
 ### REQ のバイナリ形式
 
@@ -211,8 +319,8 @@ MsgTypeReq(1) | subIdLen(2) | subId | transType(2) | tagKeyLen(2) | tagKey | tag
 ```
 
 - `transType` が `0`（`TransTypeAll`）の場合はすべてのタイプを購読
-- `transType` が `1` / `2` / `3` の場合は、対応するタイプ（JSON / String / Binary）のイベントを購読
-- `tagKey` / `tagVal` でタグによる絞り込みが可能（現在は `tagKey = "pubkey"` で公開鍵を絞り込み、空文字で指定なし）
+- `transType` が `1`〜`5` の場合は、対応するタイプ（JSON / String / Binary / Signed / Encrypted）のイベントを購読
+- `tagKey` / `tagVal` でタグによる絞り込みが可能（`tagKey = "pubkey"` で公開鍵、`tagKey = "to"` で宛先を指定）
 
 ### PUSH のバイナリ形式
 
@@ -236,10 +344,11 @@ MsgTypeDel(1) | transType(2) | targetType(1) | pubkey(33)
 transType(2) | targetType(1) | pubkey(33) | [createdAt(8) | contentHash(32)]
 ```
 
-- `transType` — 削除対象の送信タイプ（`0`=全タイプ, `1`=JSON, `2`=String, `3`=Binary）
+- `transType` — 削除対象の送信タイプ（`0`=全タイプ, `1`=JSON, `2`=String, `3`=Binary, `4`=Signed, `5`=Encrypted）
 - `targetType` — 削除対象の指定方法
   - `0`（`DelTargetPubkey`）: その公開鍵のイベントを `transType` 単位で全削除
   - `1`（`DelTargetEvent`）: `createdAt` と `contentHash`（content の SHA-256）が一致する特定イベントを削除
+  - `2`（`DelTargetEventId`）: `eventId`（全体署名イベントのイベント ID）が一致する特定イベントを削除
 - `pubkey` — 削除対象イベントの公開鍵（自分の公開鍵のみ）
 - `signature` — 上記の署名対象を送信者の秘密鍵で署名した ECDSA 署名（64 バイト）
 
@@ -279,6 +388,8 @@ req.signature = signContent(kp.privateKey, signed)
 | `json`      | TransTypeJSON    | 現在時刻 + 乱数         |
 | `string`    | TransTypeString  | 現在時刻 + 乱数         |
 | `binary`    | TransTypeBinary  | 現在時刻 + 乱数         |
+| `signed`    | TransTypeSigned  | 現在時刻 + 乱数         |
+| `encrypted` | TransTypeEncrypted | 現在時刻 + 乱数        |
 
 - サーバーは content を解釈しないため、どのタイプも一意なキーで追記保存されます
 - サーバー終了時（Ctrl+C）に環境をクローズし、データは再起動後も保持されます
