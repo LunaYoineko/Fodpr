@@ -26,9 +26,23 @@
 ##                          クライアントはサイズのみ表示する（そのまま文字列化しない）。
   ##   - TransTypeAll    (0): イベント側では使用しない。REQ でのみ「すべての送信方法を
   ##                          購読する」ことを表す。
-  ##   - TransTypeSigned (4): 全体署名イベント。createdAt / pubkey / tags を含む
-  ##                          全フィールドを署名対象とし、署名対象バイト列の SHA-256 を
-  ##                          イベントID として使う（メール用途の拡張）。
+##   - TransTypeSigned (4): 全体署名イベント。createdAt / pubkey / tags を含む
+##                          全フィールドを署名対象とし、署名対象バイト列の SHA-256 を
+##                          イベントID として使う（メール用途の拡張）。
+##   - TransTypeEncrypted (5): 暗号化イベント。content は envelope.nim の
+##                          エンベロープ (宛先別暗号化, gift-wrap 相当)。
+##                          全体署名 (TransTypeSigned と同じ検証) を使い、
+##                          to:<fpub> タグがエンベロープ内の受信者と一致する必要がある。
+##                          サーバーは構造のみ検証し、内容は復号しない。
+##   - TransTypeWebRTC (6): WebRTC シグナリング専用。
+##                          クライアントがこのタイプでシグナリング要求 (REQ) を送ると、
+##                          リレーはイベントの保存・永続化を行わず、純粋なシグナリング
+##                          サーバーとして動作する (シグナリングメッセージは破棄される)。
+##                          P2P 確立後、双方は WebRTC データチャネルで直接通信し、
+##                          リレーはその後関与しない。
+##                          シグナリングには MsgTypeSignal (0x05) / MsgTypeSignalPush (0x83)
+##                          を使用し、content には SDP offer/answer や ICE candidate
+##                          (IPv6 一時アドレスを含む) を JSON 等で格納する。
 
 import streams, endians, strutils
 import crypto, secp256k1
@@ -42,8 +56,10 @@ const
   MsgTypeReq*   = char(0x02)   # 購読要求
   MsgTypeDel*   = char(0x03)   # イベント削除要求 (クライアント → サーバー)
   MsgTypeAuth*  = char(0x04)   # 認証応答 (クライアント → サーバー, NIP-42 相当)
+  MsgTypeSignal*     = char(0x05)   # シグナリングメッセージ (クライアント → サーバー, WebRTC 専用)
   MsgTypePush*  = char(0x81)   # イベント配信
   MsgTypeChallenge* = char(0x82) # 認証チャレンジ (サーバー → クライアント)
+  MsgTypeSignalPush* = char(0x83) # シグナリング配信 (サーバー → クライアント, WebRTC 専用)
   
   # 送信タイプ (TransType)。
   # イベントの content を「どのように送るか」を表す。各ユーザーが自由に選べる。
@@ -62,6 +78,20 @@ const
                                  # 全体署名 (TransTypeSigned と同じ検証) を使い、
                                  # to:<fpub> タグがエンベロープ内の受信者と一致する必要がある。
                                  # サーバーは構造のみ検証し、内容は復号しない。
+  TransTypeWebRTC*  = 6.uint16   # WebRTC シグナリング専用。リレーはシグナリングサーバーに徹し、
+                                 # イベントは保存せず MsgTypeSignal で即時中継する。
+                                 # content には SDP offer/answer や ICE candidate
+                                 # (IPv6 一時アドレスを含む) を格納する。
+                                 # 全体署名 (TransTypeSigned と同じ検証) を必須とする。
+                                 # 双方の P2P 接続確立後、リレーは関与しない。
+
+  # シグナリングメッセージの種別 (SignalType)。
+  # WebRTC ハンドシェイクでやり取りするメッセージの種類を表す。
+  SignalOffer*      = 1.uint8   # SDP Offer (IPv6 一時アドレスを含む候補)
+  SignalAnswer*     = 2.uint8   # SDP Answer
+  SignalCandidate*  = 3.uint8   # ICE Candidate (IPv6 一時アドレスを含む)
+  SignalHostChange* = 4.uint8   # ホスト変更通知 (リレーから全メンバーへ配信)
+                                # content は JSON: {"newHost":"<fpub>"}
 
   # 削除要求 (DEL) の削除対象タイプ。
   DelTargetPubkey* = 0.uint8   # 公開鍵単位で削除 (その送信者のイベントを全削除)
@@ -109,6 +139,20 @@ type
     nonce*     : array[32, byte]    # サーバーから受け取ったチャレンジ nonce
     pubkey*    : SkPublicKey        # 認証する公開鍵
     signature* : FodprSignature     # nonce(32) | pubkey(33) に対する署名
+
+  # WebRTC シグナリングメッセージ (TransTypeWebRTC 用)。
+  # リレーは content を解釈せず、署名検証後に宛先 (target) の認証済み購読者へ
+  # 即座に中継する (保存はしない)。
+  # 双方はシグナリングメッセージの secp256k1 署名を検証し、
+  # P2P 接続確立後は直接 WebRTC データチャネルで通信する。
+  # content には SDP offer/answer JSON や ICE candidate JSON
+  # (IPv6 一時アドレスを含む) を格納する。
+  FodprSignal* = object
+    signalType*  : uint8       # SignalOffer / SignalAnswer / SignalCandidate
+    sender*      : SkPublicKey # 送信者の公開鍵 (圧縮形式 33 バイト)
+    target*      : SkPublicKey # 宛先の公開鍵 (認証済み subscriber の fpub と一致)
+    content*     : string      # SDP JSON / ICE candidate JSON (IPv6 一時アドレス含む)
+    signature*   : FodprSignature # 上記フィールド全体の ECDSA 署名
 
 # ---------------------------------------------------------------------------
 # EVENT のエンコード
@@ -521,4 +565,123 @@ proc transTypeName*(transType: uint16): string =
   of TransTypeBinary: "Binary"
   of TransTypeSigned: "Signed"
   of TransTypeEncrypted: "Encrypted"
+  of TransTypeWebRTC: "WebRTC"
   else: "Unknown(" & $transType & ")"
+
+# シグナリングメッセージの種別の数値から表示用の名前を返す。
+proc signalTypeName*(signalType: uint8): string =
+  case signalType
+  of SignalOffer:    "Offer"
+  of SignalAnswer:   "Answer"
+  of SignalCandidate: "Candidate"
+  of SignalHostChange: "HostChange"
+  else: "Unknown(" & $signalType & ")"
+
+# ---------------------------------------------------------------------------
+# WebRTC シグナリングメッセージ (MsgTypeSignal / MsgTypeSignalPush)
+# ---------------------------------------------------------------------------
+# パケット形式 (クライアント → サーバー, MsgTypeSignal = 0x05):
+#   MsgTypeSignal(1) | signalType(1) | senderPubkey(33) | targetPubkey(33) |
+#   contentLen(4) | content | signature(64)
+#
+# パケット形式 (サーバー → クライアント, MsgTypeSignalPush = 0x83):
+#   MsgTypeSignalPush(1) | subIdLen(2) | subId |
+#   signalType(1) | senderPubkey(33) | targetPubkey(33) |
+#   contentLen(4) | content | signature(64)
+#
+# 署名対象バイト列 (senderPubkey が所有する秘密鍵で署名):
+#   signalType(1) | senderPubkey(33) | targetPubkey(33) | contentLen(4) | content
+#
+# セキュリティモデル:
+#   - 送信者は signalType / sender / target / content に対して secp256k1 (ECDSA)
+#     で署名する。リレーは署名を検証後、宛先に中継する。
+#   - 受信者は受信したシグナリングメッセージの署名を検証し、送信者の身元を確かめる。
+#   - リレーは content を解釈・復号せず、署名検証 + 宛先照合のみを行う。
+#   - シグナリングメッセージは保存されず (TransTypeWebRTC 専用)、
+#     P2P 接続確立後はリレーを通らない。
+#   - content には SDP offer/answer JSON や ICE candidate JSON (IPv6 一時アドレス
+#     を含む) を格納する。IP アドレスの公開は発信者の責任となる。
+
+# シグナリングメッセージの署名対象バイト列をエンコードする:
+#   signalType(1) | senderPubkey(33) | targetPubkey(33) | contentLen(4) | content
+proc encodeSignalSignedData*(s: FodprSignal): string =
+  result = ""
+
+  # signalType (1 バイト)
+  result.add(char(byte(s.signalType)))
+
+  # senderPubkey (圧縮形式 33 バイト)
+  let senderRaw = s.sender.toRawCompressed()
+  for b in senderRaw: result.add(char(b))
+
+  # targetPubkey (圧縮形式 33 バイト)
+  let targetRaw = s.target.toRawCompressed()
+  for b in targetRaw: result.add(char(b))
+
+  # content (長さは uint32, ビッグエンディアン)
+  let cLen = uint32(s.content.len)
+  var clNet: uint32
+  bigEndian32(addr clNet, unsafeAddr cLen)
+  var clBytes: array[4, byte]
+  copyMem(addr clBytes[0], addr clNet, 4)
+  for b in clBytes: result.add(char(b))
+  result.add(s.content)
+
+# シグナリングメッセージをワイヤ形式にエンコードする:
+#   encodeSignalSignedData の結果に signature(64) を連結する。
+# (MsgTypeSignal / MsgTypeSignalPush の msgType バイトは含めない。
+#  呼び出し側が付与する。)
+proc encodeSignal*(s: FodprSignal): string =
+  result = encodeSignalSignedData(s)
+
+  # signature（compact 形式 64 バイト）
+  let sigRaw = s.signature.sig.toRaw()
+  for b in sigRaw: result.add(char(b))
+
+# シグナリングメッセージへの署名。sender フィールドは署名する前に
+# 送信者の公開鍵で埋めること (署名対象データに含めるため)。
+proc signSignal*(priv: SkSecretKey, s: FodprSignal): FodprSignature =
+  signBytes(priv, encodeSignalSignedData(s))
+
+# シグナリングメッセージの署名検証。sender フィールドの公開鍵で検証する。
+proc verifySignal*(s: FodprSignal): bool =
+  verifyBytes(s.sender, encodeSignalSignedData(s), s.signature)
+
+# ストリームからシグナリングメッセージ本体を復元する (署名対象 + signature)。
+# msgType バイトは呼び出し側が読み飛ばしてから渡すこと。
+proc decodeSignal*(stream: Stream): FodprSignal =
+  # signalType (1 バイト)
+  let sigTypeByte = stream.readChar()
+
+  # senderPubkey (圧縮形式 33 バイト)
+  let senderBytes = stream.readStr(33)
+  var senderArr: array[33, byte]
+  for i in 0..<33: senderArr[i] = byte(senderBytes[i])
+  let senderPub = parsePublicKey(senderArr)
+
+  # targetPubkey (圧縮形式 33 バイト)
+  let targetBytes = stream.readStr(33)
+  var targetArr: array[33, byte]
+  for i in 0..<33: targetArr[i] = byte(targetBytes[i])
+  let targetPub = parsePublicKey(targetArr)
+
+  # content (長さは uint32)
+  let clBytes = stream.readStr(4)
+  var clNet, cLen: uint32
+  copyMem(addr clNet, unsafeAddr clBytes[0], 4)
+  bigEndian32(addr cLen, addr clNet)
+  let content = stream.readStr(int(cLen))
+
+  # signature (compact 形式 64 バイト)
+  let sigBytes = stream.readStr(64)
+  var sigArr: array[64, byte]
+  for i in 0..<64: sigArr[i] = byte(sigBytes[i])
+  let signature = FodprSignature(sig: parseSignature(sigArr))
+
+  return FodprSignal(
+    signalType: byte(sigTypeByte),
+    sender: senderPub,
+    target: targetPub,
+    content: content,
+    signature: signature
+  )
