@@ -41,10 +41,17 @@ sent and received through a **relay server**, a kind of relay station.
   per recipient (gift-wrap equivalent). Only the intended recipients can
   decrypt the body. The relay verifies the structure but cannot read it.
 
-- **Reader authentication (read auth)**
-  Recipient-limited events (`to:<fpub>` tag) are only delivered to
-  subscriptions authenticated as that recipient via a challenge (AUTH,
-  the equivalent of NIP-42).
+  - **Reader authentication (read auth)**
+    Recipient-limited events (`to:<fpub>` tag) are only delivered to
+    subscriptions authenticated as that recipient via a challenge (AUTH,
+    the equivalent of NIP-42).
+
+  - **WebRTC signaling**
+    `TransTypeWebRTC` (6) opens a signaling-only channel via SIGNAL (0x05) /
+    SIGNAL_PUSH (0x83) messages, relaying SDP/ICE candidates (including IPv6
+    temporary addresses) with secp256k1 signatures. Signaling messages are not
+    stored — forwarded immediately. Supports host-guest star topology with
+    automatic host failover.
 
 ## How it works in one glance
 
@@ -192,8 +199,10 @@ FodprRelay/
 | 0x02  | REQ   | client → server          | Subscription request         |
 | 0x03  | DEL   | client → server          | Delete-events request (signed)|
 | 0x04  | AUTH  | client → server          | Read-authentication signature response (NIP-42 equivalent) |
+| 0x05  | SIGNAL | client → server         | WebRTC signaling message     |
 | 0x81  | PUSH  | server → client          | Event delivery               |
 | 0x82  | CHALLENGE | server → client       | Authentication challenge (32-byte nonce) |
+| 0x83  | SIGNAL_PUSH | server → client     | WebRTC signaling relay       |
 
 All integers are encoded in **big-endian** byte order.
 
@@ -213,6 +222,7 @@ specific key/value as a profile).
 | `TransTypeBinary`  | 3     | Binary data (`content` is arbitrary bytes)           | Delivered as-is; client shows the size only          |
 | `TransTypeSigned`  | 4     | Full-event signing (`content` is arbitrary)          | All fields are signed; SHA-256 of the signed bytes is the event ID |
 | `TransTypeEncrypted` | 5   | Encrypted event (`content` is an envelope)          | `content` is a per-recipient envelope from `envelope.nim`. Validates full signature + `to:` tag match |
+| `TransTypeWebRTC`  | 6     | WebRTC signaling (signaling-only channel)            | Uses SIGNAL (0x05) / SIGNAL_PUSH (0x83). Never stored; forwarded with secp256k1 signatures |
 | `TransTypeAll`     | 0     | All types (REQ only)                                 | Server delivers stored events of every type          |
 
 ### EVENT binary layout
@@ -222,7 +232,7 @@ transType(2) | createdAt(8) | pubkey(33) | tagCount(2)
 | (tagLen(2) | tag) × tagCount | contentLen(4) | content | signature(64)
 ```
 
-- `transType` — transmission type (uint16: 0=All (REQ only), 1=JSON, 2=String, 3=Binary, 4=Signed, 5=Encrypted)
+- `transType` — transmission type (uint16: 0=All (REQ only), 1=JSON, 2=String, 3=Binary, 4=Signed, 5=Encrypted, 6=WebRTC)
 - `createdAt` — Unix timestamp in seconds (uint64)
 - `pubkey` — sender's public key (compressed, 33 bytes)
 - `tags` — list of tag strings
@@ -326,6 +336,9 @@ MsgTypeReq(1) | subIdLen(2) | subId | transType(2) | tagKeyLen(2) | tagKey | tag
 
 - `transType` of `0` (`TransTypeAll`) subscribes to every type
 - `transType` of `1` through `5` subscribes to the matching type (JSON / String / Binary / Signed / Encrypted)
+- `transType` of `6` (`TransTypeWebRTC`) subscribes to WebRTC signaling only.
+  The `to:` tag (recipient fpub) is required. No stored events are returned (EOE
+  only); subsequent SIGNAL messages are relayed in real time
 - `tagKey` / `tagVal` filter events by tag (`tagKey = "pubkey"` filters by public key, `tagKey = "to"` filters by recipient)
 
 ### PUSH binary layout
@@ -383,6 +396,87 @@ req.signature = signContent(kp.privateKey, signed)
 
 On the server side, restore the packet with `decodeDelReq(stream)` and verify
 the signature with `verifyContent`.
+
+### WebRTC Signaling (TransTypeWebRTC)
+
+`TransTypeWebRTC` (6) is for WebRTC P2P signaling. The relay acts as a
+**signaling server only** — it never stores signaling messages and forwards them
+immediately after signature verification. After the P2P connection is
+established, the relay is no longer involved.
+
+#### Signaling messages (SIGNAL / SIGNAL_PUSH)
+
+**SIGNAL packet (0x05, client → server):**
+
+```
+MsgTypeSignal(1) | signalType(1) | senderPubkey(33) | targetPubkey(33) | contentLen(4) | content | signature(64)
+```
+
+**SIGNAL_PUSH packet (0x83, server → client):**
+
+```
+MsgTypeSignalPush(1) | subIdLen(2) | subId | signalType(1) | senderPubkey(33) | targetPubkey(33) | contentLen(4) | content | signature(64)
+```
+
+**Signed data:**
+
+```
+signalType(1) | senderPubkey(33) | targetPubkey(33) | contentLen(4) | content
+```
+
+| Field | Description |
+|-------|-------------|
+| `signalType` | `1`=Offer, `2`=Answer, `3`=Candidate, `4`=HostChange |
+| `senderPubkey` | Sender's public key (compressed, 33 bytes) |
+| `targetPubkey` | Recipient's public key (compressed, 33 bytes) |
+| `content` | SDP offer/answer JSON or ICE candidate JSON (IPv6 temporary addresses included) |
+| `signature` | secp256k1 ECDSA signature over all the above (64 bytes) |
+
+Library API:
+
+```nim
+# Create and sign a signaling message
+var sig = FodprSignal(
+  signalType: SignalOffer,
+  sender: kp.publicKey,
+  target: targetPub,
+  content: """{"sdp":"...","candidates":[...],"ipv6TempAddr":"2001:db8::1"}""")
+sig.signature = signSignal(kp.privateKey, sig)
+let packet = $MsgTypeSignal & encodeSignal(sig)
+
+# Receive and verify
+let received = decodeSignal(strm)
+if verifySignal(received):
+  # signature OK — trust the sender
+  echo signalTypeName(received.signalType), ": ", received.content
+```
+
+#### Host-guest star topology & automatic host failover
+
+Supports a star topology where multiple guests connect to one host via WebRTC.
+
+- **Group ID** = the host's fpub (lowercase)
+- Clients join a host's group by subscribing with
+  `REQ(TransTypeWebRTC, tagKey="to", tagVal=<host_fpub>)` (AUTH required)
+- When the host disconnects, the **oldest guest** (earliest `joinedAt`) is
+  automatically promoted to host
+- The relay sends a text notification `HOST_CHANGE: <new_host_fpub>` to all
+  remaining members
+- Members re-subscribe with the new host's fpub
+
+```
+Host (B) ── signal ──→  Relay  ←── signal ──  Guest (A)
+Host (B) ── signal ──→  Relay  ←── signal ──  Guest (C)
+
+B disconnects → A (oldest guest) promoted → HOST_CHANGE → everyone reconnects
+```
+
+- P2P communication uses **IPv6 temporary addresses** (SDP/ICE candidates in
+  `content` as JSON)
+- The relay never interprets or decrypts `content`; only signature verification
+  and recipient matching are performed
+- Both peers verify each other's secp256k1 signatures on received signals
+- After P2P establishment, direct data channel communication bypasses the relay
 
 ### Storage (server.nim in FodprRelay)
 

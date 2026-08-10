@@ -40,9 +40,15 @@ Fodpr（ふぉどぷる）は、SNS のような「投稿」を、特定の会�
   宛先にした本人だけが本文を復号できます（gift-wrap 相当）。
   リレーは構造だけを検証し、内容は復号できません。
 
-- **読む人を認証できる（読取認証）**
-  宛先限定イベント（`to:<fpub>` タグ）は、その宛先本人として
-  チャレンジ認証（NIP-42 相当の AUTH）を通した購読にだけ配信されます。
+  - **読む人を認証できる（読取認証）**
+    宛先限定イベント（`to:<fpub>` タグ）は、その宛先本人として
+    チャレンジ認証（NIP-42 相当の AUTH）を通した購読にだけ配信されます。
+
+  - **WebRTC シグナリング**
+    `TransTypeWebRTC`（6）でシグナリング専用チャネルを確立し、SDP/ICE candidate
+    （IPv6 一時アドレスを含む）を secp256k1 署名付きで中継します。
+    シグナリングメッセージは保存されず（即座に中継）、P2P 接続確立後は
+    リレーを通りません。ホスト-ゲスト星形トポロジで自動ホスト昇格機能付き。
 
 ## しくみをひとことで
 
@@ -190,8 +196,10 @@ FodprRelay/
 | 0x02 | REQ   | クライアント → サーバー | サブスクリプション要求     |
 | 0x03 | DEL   | クライアント → サーバー | イベント削除要求（署名付き）|
 | 0x04 | AUTH  | クライアント → サーバー | 読取認証の署名応答（NIP-42 相当）|
+| 0x05 | SIGNAL | クライアント → サーバー | WebRTC シグナリングメッセージ |
 | 0x81 | PUSH  | サーバー → クライアント | イベント配信               |
 | 0x82 | CHALLENGE | サーバー → クライアント | 認証チャレンジ（nonce 32 バイト）|
+| 0x83 | SIGNAL_PUSH | サーバー → クライアント | WebRTC シグナリングの中継 |
 
 数値はすべて **ビッグエンディアン** でエンコードされます。
 
@@ -209,6 +217,7 @@ FodprRelay/
 | `TransTypeBinary` | 3  | バイナリデータ（content は任意のバイト列）    | バイナリのまま配信。クライアントはサイズのみ表示 |
 | `TransTypeSigned` | 4  | 全体署名イベント（content は任意）           | 本文だけでなく全フィールドを署名。その SHA-256 がイベント ID になる |
 | `TransTypeEncrypted` | 5  | 暗号化イベント（content はエンベロープ）    | content は envelope.nim の宛先別暗号化エンベロープ。全体署名 + to: タグ一致を検証 |
+| `TransTypeWebRTC`  | 6  | WebRTC シグナリング専用                    | SIGNAL (0x05) / SIGNAL_PUSH (0x83) で中継。保存せず即座に配信 |
 | `TransTypeAll`    | 0  | すべてのタイプ（REQ でのみ使用）             | サーバーが全タイプの保存イベントを配信           |
 
 ### EVENT のバイナリ形式
@@ -218,7 +227,7 @@ transType(2) | createdAt(8) | pubkey(33) | tagCount(2)
 | (tagLen(2) | tag) × tagCount | contentLen(4) | content | signature(64)
 ```
 
-- `transType` — 送信タイプ（uint16: 0=All(REQ のみ), 1=JSON, 2=String, 3=Binary, 4=Signed, 5=Encrypted）
+- `transType` — 送信タイプ（uint16: 0=All(REQ のみ), 1=JSON, 2=String, 3=Binary, 4=Signed, 5=Encrypted, 6=WebRTC）
 - `createdAt` — Unix タイムスタンプ（秒, uint64）
 - `pubkey` — 送信者の公開鍵（圧縮形式 33 バイト）
 - `tags` — タグ文字列のリスト
@@ -320,6 +329,9 @@ MsgTypeReq(1) | subIdLen(2) | subId | transType(2) | tagKeyLen(2) | tagKey | tag
 
 - `transType` が `0`（`TransTypeAll`）の場合はすべてのタイプを購読
 - `transType` が `1`〜`5` の場合は、対応するタイプ（JSON / String / Binary / Signed / Encrypted）のイベントを購読
+- `transType` が `6`（`TransTypeWebRTC`）の場合は WebRTC シグナリング専用。`to:` タグ
+  (宛先 fpub) が必須。保存済みイベントはなく EOE のみ送信され、以後は SIGNAL メッセージの
+  リアルタイム中継のみを行う
 - `tagKey` / `tagVal` でタグによる絞り込みが可能（`tagKey = "pubkey"` で公開鍵、`tagKey = "to"` で宛先を指定）
 
 ### PUSH のバイナリ形式
@@ -377,6 +389,83 @@ req.signature = signContent(kp.privateKey, signed)
 
 サーバー側では `decodeDelReq(stream)` でパケットを復元し、`verifyContent` で
 署名を検証します。
+
+### WebRTC シグナリング（TransTypeWebRTC）
+
+`TransTypeWebRTC`（6）は WebRTC の P2P 確立のためのシグナリング専用です。
+リレーはシグナリングメッセージを保存せず、署名検証後に即座に宛先へ中継します。
+
+#### シグナリングメッセージ (SIGNAL / SIGNAL_PUSH)
+
+**SIGNAL パケット (0x05, クライアント → サーバー):**
+
+```
+MsgTypeSignal(1) | signalType(1) | senderPubkey(33) | targetPubkey(33) | contentLen(4) | content | signature(64)
+```
+
+**SIGNAL_PUSH パケット (0x83, サーバー → クライアント):**
+
+```
+MsgTypeSignalPush(1) | subIdLen(2) | subId | signalType(1) | senderPubkey(33) | targetPubkey(33) | contentLen(4) | content | signature(64)
+```
+
+**署名対象バイト列:**
+
+```
+signalType(1) | senderPubkey(33) | targetPubkey(33) | contentLen(4) | content
+```
+
+| フィールド | 説明 |
+|----------|------|
+| `signalType` | `1`=Offer, `2`=Answer, `3`=Candidate, `4`=HostChange |
+| `senderPubkey` | 送信者の公開鍵 (圧縮 33 バイト) |
+| `targetPubkey` | 宛先の公開鍵 (圧縮 33 バイト) |
+| `content` | SDP offer/answer JSON や ICE candidate JSON (IPv6 一時アドレスを含む) |
+| `signature` | 上記フィールド全体の secp256k1 ECDSA 署名 (64 バイト) |
+
+ライブラリ API:
+
+```nim
+# シグナリングメッセージ作成・署名
+var sig = FodprSignal(
+  signalType: SignalOffer,
+  sender: kp.publicKey,
+  target: targetPub,
+  content: """{"sdp":"..."," candidates":[...]," ipv6TempAddr":"2001:db8::1"}""")
+sig.signature = signSignal(kp.privateKey, sig)
+let packet = $MsgTypeSignal & encodeSignal(sig)
+
+# 受信・検証
+let received = decodeSignal(strm)
+if verifySignal(received):
+  # 署名 OK — 信頼できる送信者
+  echo signalTypeName(received.signalType), ": ", received.content
+```
+
+#### ホスト-ゲスト星形トポロジと自動ホスト昇格
+
+複数のゲストが 1 人のホストに対して WebRTC 接続を張る星形トポロジをサポートします。
+
+- **グループ ID** = ホストの fpub (小文字)
+- クライアントは `REQ(TransTypeWebRTC, tagKey="to", tagVal=<ホスト fpub>)` で
+  ホストのグループに参加 (AUTH 必須)
+- ホストが切断された場合、**最古の guest** (join 時刻が最も古いメンバー) が
+  自動でホストに昇格
+- リレーは全メンバーにテキスト通知 `HOST_CHANGE: <new_host_fpub>` を送信
+- メンバーは新ホストの fpub で REQ を再送信し直す
+
+```
+ホスト (B)  ── シグナリング ──>  リレー  <── ゲスト (A) へ中継
+ホスト (B)  ── シグナリング ──>  リレー  <── ゲスト (C) へ中継
+
+B が切断 → A (最古の guest) が新ホストに昇格 → HOST_CHANGE 通知 → 全員再接続
+```
+
+- P2P 通信は **IPv6 一時アドレス** 同士で行われます (SDP/ICE candidate の
+  content に JSON として含まれる)
+- リレーは content を解釈・復号せず、署名検証 + 宛先照合のみを行う
+- 双方はシグナリングメッセージの secp256k1 署名を検証し、P2P データチャネル
+  での直接通信後はリレーを通らない
 
 ### ストレージ（FodprRelay の server.nim）
 
