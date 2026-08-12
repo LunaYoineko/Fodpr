@@ -5,7 +5,7 @@ F2F は、Fodpr プロトコルにおける **友人ベースの P2P メッシ�
 
 - **接続形態**: クライアント間 F2F (WebRTC データチャネル)。ホスト/星形トポロジは廃止。すべてのピアはメッシュの隣接ピア群へ直接接続する。
 - **IP 発見**: Kademlia DHT を **WebRTC データチャネル上** で走らせる (`f2f/dht.nim`)。ノード ID = SHA-256(compressed pubkey)。ピアの IPv6 は公開鍵で `FIND_NODE` / `FIND_VALUE` により解決する。
-- **WoT (Web of Trust)**: DHT で発見した IPv6 ピアを `f2f/wot.nim` でスコア化する。**新規/未検証ピアは最小スコアから開始**し、スコアが接続閾値 (デフォルト 0.0) に達した時点で初めてダイヤルされる。スコアは WoT 紹介と成功体験で上昇し、時間経過で減衰する (`decayTrustScores`)。
+- **WoT (Web of Trust)**: DHT で発見した IPv6 ピアを `f2f/wot.nim` でスコア化する。**新規/未検証ピアは最小スコアから開始**し、スコアが接続閾値 (デフォルト 0.0) に達した時点で初めてダイヤルされる。スコアは**接続実績（成功/失敗）と時間減衰のみ**で変動し、WoT 紹介による影響はない。
 - **メッセージング**: 署名済みイベントをメッシュ上でゴシップ (`f2f/discovery.nim`) — ホップ制限 (MAX_HOPS=2)、eventId で重複排除。直接 P2P メッセージは `FodprData` で運ぶ。
 - **ブートストラップ (リレーなし)**: 招待コード (`f2finv1...`)、設定シードノード (`fpub1...@[ipv6]:port`)、手動 IP 入力、**ビルトインコミュニティアンカー** (`FODPR_BOOTSTRAP_ANCHORS`)。
 - **GeoIP 排多様性**: ダイヤル候補選抜時に **国ごとに最大 2 本を優先確保**し、地域分断リスクを低減。
@@ -33,7 +33,7 @@ v0.6 で削除されたもの:
 - identityTrust: 知人紹介や公開鍵基盤での信頼継承。Sybil耐性の基礎。
 - reliabilityScore: 実際の接続品質と持続性。信頼スコアが閾値 (connect threshold) に達したピアのみダイヤル許可。
 
-WoT 紹介 (`MsgTypeWoTIntro(0x08/0x88)`) で紹介者の identityTrust をベースに評価し、newPeer の initial reliabilityScore を決定。時間経過で reliabilityScore が減衰 (`f2f/wot.nim:decayTrustScores`)。identityTrust は変更されない。connect threshold: reliabilityScore >= 0.0 で初めてダイヤル可能（デフォルト最小値）。
+WoT 紹介 (`MsgTypeWoTIntro(0x08/0x88)`) は**発信情報の記録のみ**。reliabilityScoreは紹介で決定されず、newPeerは常に0.0から開始し、接続実績（成功/失敗）と時間減衰 (`f2f/wot.nim:decayTrustScores`) で変動する。identityTrust は変更されない。connect threshold: reliabilityScore >= 0.0 で初めてダイヤル可能（デフォルト最小値）。
 
 ## 4. 最大 50 件のキャッシュ上限 (LRU + スコア順)
 `peer_cache.nim` (ファイル) に永続化。`selectPeers` はスコア順で選択、古い物から LRU 削除。再起動時にキャッシュから即座に自動ダイヤル開始。
@@ -53,8 +53,6 @@ WoT 紹介 (`MsgTypeWoTIntro(0x08/0x88)`) で紹介者の identityTrust をベ�
 
 - **WoT紹介は発見と来歴の記録のみ。reliabilityScoreは紹介で変更されない**。
 - expiresAt (秒単位) で紹介の有効期限を設定。古い紹介は無視され、新しい紹介が採用される。
-
-受信側は hopCount と pathDecay を計算し、信頼閾値を下回る紹介は接続対象外とする。
 
 ## 6. Kademlia DHT によるピア発見と IP 解決
 256ビット ID (`nodeId = SHA-256(compressed pubkey)`)、k-buckets ルーティングテーブル (`f2f/dht.nim`)。`PING` / `FIND_NODE` / `FIND_VALUE` / `STORE` を **データチャネル上** で RPC。`FIND_VALUE` により公開鍵 → IPv6 の解決。**（現状アンカーがあるため、データチャネル上のみで動作）**。ルーティングテーブルは少なくとも 1 つの メッシュ隣接が生きていれば生存する。
@@ -106,7 +104,7 @@ interface F2FPeerInfo {
 - newPeer: PeerInfo — 紹介する新ピアの情報
 - signature: FodprSignature(64) — 紹介者の署名 (introducer/newPeer 全体)
 
-紹介者の信頼をベースに、`newPeer` の初期 trustScore を決定 (シビル耐性)。
+WoT紹介は発見と来歴の記録にのみ使用され、`newPeer` のスコアに影響はない。
 
 ## 招待コード (InvitationCode) — `TransTypeInvitation (0x0B)` / `MsgTypeInvitationReq(0x09)` / `MsgTypeInvitationPush(0x89)` Bech32: `f2finv1...` (`f2f/invitation.nim`)。
 構造: `version(1) | issuer(33) | targetPeer(PeerInfo) | expiresAt(8) | scope(1) | invitationId(16) | usedAt(8) | signature(64)`
