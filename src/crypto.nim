@@ -67,7 +67,7 @@ proc convertBits(data: openArray[byte], fromBits, toBits: int, pad: bool): seq[b
     raise newException(ValueError, "Invalid padding in convertBits")
 
 # 8bit バイト列を Bech32 文字列 (hrp + "1" + データ + 6文字チェックサム) に変換する。
-proc bech32Encode(hrp: string, data: openArray[byte]): string =
+proc bech32Encode*(hrp: string, data: openArray[byte]): string =
   # まず 8bit → 5bit に変換する (Bech32 は 5bit 単位で文字に割り当てるため)
   let converted = convertBits(data, 8, 5, true)
   # チェックサム計算のために HRP 展開値 + データ + チェックサム用ゼロ6文字分を連結
@@ -86,7 +86,7 @@ proc bech32Encode(hrp: string, data: openArray[byte]): string =
 
 # Bech32 文字列を検証しつつ、データ部分を 8bit バイト列へ復元する。
 # HRP が一致しない場合や不正な文字が含まれる場合は ValueError を投げる。
-proc bech32Decode(bechStr: string, expectedHrp: string): seq[byte] =
+proc bech32Decode*(bechStr: string, expectedHrp: string): seq[byte] =
   if bechStr.len < 8:
     raise newException(ValueError, "Bech32 string too short")
 
@@ -194,6 +194,13 @@ proc signBytes*(priv: SkSecretKey, data: string): FodprSignature =
   let msg = SkMessage(computeSHA256(data))
   # ② ECDSA で署名を生成
   result = FodprSignature(sig: priv.sign(msg))
+
+# 空の署名を作成 (プレースホルダ用)
+proc emptySignature*(): FodprSignature =
+  var zeroBytes: array[64, byte]
+  for i in 0..<64: zeroBytes[i] = 0
+  let sig = parseSignature(zeroBytes)
+  return FodprSignature(sig: sig)
 
 # 公開鍵を使い、対象バイト列に対する署名が正しいかどうかを検証する。
 # 署名時に使ったのと同じハッシュ化を行い、一致すれば true を返す。

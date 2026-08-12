@@ -50,6 +50,18 @@ Fodpr（ふぉどぷる）は、SNS のような「投稿」を、特定の会�
     シグナリングメッセージは保存されず（即座に中継）、P2P 接続確立後は
     リレーを通りません。ホスト-ゲスト星形トポロジで自動ホスト昇格機能付き。
 
+- **F2F (Friend-to-Friend) / WoT (Web of Trust) P2P**
+  - 知り合い経由でピアを発見し、最大 50 件までピアキャッシュ（`localStorage`）を保存
+  - 招待コード (`f2finv1...` Bech32) で初回接続、またはリレーのシード機能でブートストラップ
+  - P2P 接続確立時に **署名付き PeerList** (`TransTypePeerList` / `MsgTypePeerListPush`) を
+    相互交換し、キャッシュをマージして未接続ピアへ自動ダイヤル（リレー不要）
+  - 紹介 (`MsgTypeWoTIntroPush`) で新ピアを発見・信頼スコア更新
+
+- **RtcGroup (ホスト昇格型 P2P)**
+  - 最初の接続者がホスト、他はホストへ星形接続。ホスト切断時に最古参加者が自動昇格
+  - `HOST_CHANGE: <new_fpub>` テキスト通知で全員再接続
+  - グループ状態は `TransTypeGroup` (`group:<groupId>` タグ) でリレーに永続化
+
 ## しくみをひとことで
 
 まるで郵便のしくみに似ています。「リレーサーバー」は郵便局、「イベント」は手紙、
@@ -466,6 +478,19 @@ B が切断 → A (最古の guest) が新ホストに昇格 → HOST_CHANGE 通
 - リレーは content を解釈・復号せず、署名検証 + 宛先照合のみを行う
 - 双方はシグナリングメッセージの secp256k1 署名を検証し、P2P データチャネル
   での直接通信後はリレーを通らない
+
+#### F2F (Friend-to-Friend) / WoT (Web of Trust) P2P
+
+- **ピアキャッシュ**: 最大 50 件の `F2FPeerInfo` (pubkey, addresses, lastSeen, trustScore)
+  を `localStorage.fodpr_f2f_peer_cache` に永続化
+- **ブートストラップ**: 招待コード (`f2finv1...` Bech32) またはリレーのシード取得 (`bootstrap()`)
+- **PeerList 交換**: P2P 接続確立直後に `TransTypePeerList` (0x09) / `MsgTypePeerListPush` (0x87)
+  で署名付きピアリスト (最大 50 件) を相互送信。受信側はキャッシュマージ後、
+  未接続ピアへ自動ダイヤルして最大 50 接続まで連鎖的に P2P を確立
+- **WoT 紹介**: `MsgTypeWoTIntroPush` (0x88) で信頼できるピアから新ピアを紹介
+  (trustScore 継承)
+- **グループ**: ホスト-ゲスト星形 (`TransTypeGroup` でリレーに永続化)。ホスト切断時
+  自動昇格 (`group_host_changed`)
 
 ### ストレージ（FodprRelay の server.nim）
 

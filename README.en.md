@@ -53,6 +53,19 @@ sent and received through a **relay server**, a kind of relay station.
     stored — forwarded immediately. Supports host-guest star topology with
     automatic host failover.
 
+- **F2F (Friend-to-Friend) / WoT (Web of Trust) P2P**
+  - Peer discovery via trusted contacts, max 50 peers cached in `localStorage`
+  - Bootstrap via invitation code (`f2finv1...` Bech32) or relay seed (`bootstrap()`)
+  - On P2P connection, exchange **signed PeerList** (`TransTypePeerList` / `MsgTypePeerListPush`)
+    with each other, merge caches, and auto-dial new peers (up to 50 connections, relay-free)
+  - WoT introduction (`MsgTypeWoTIntroPush`) for trusted peer discovery with score inheritance
+  - Groups with host-guest star topology (`TransTypeGroup` persisted on relay); host failover on disconnect
+
+- **RtcGroup (Host-Promotion P2P)**
+  - First connection becomes host; others connect in star topology. Oldest guest auto-promoted on host disconnect
+  - `HOST_CHANGE: <new_fpub>` text notification triggers re-subscription to new host
+  - Group state persisted on relay via `TransTypeGroup` with `group:<groupId>` tag
+
 ## How it works in one glance
 
 Think of it like the postal system: the **relay server** is the post office,
@@ -477,6 +490,18 @@ B disconnects → A (oldest guest) promoted → HOST_CHANGE → everyone reconne
   and recipient matching are performed
 - Both peers verify each other's secp256k1 signatures on received signals
 - After P2P establishment, direct data channel communication bypasses the relay
+
+#### F2F (Friend-to-Friend) / WoT (Web of Trust) P2P
+
+- **Peer cache**: up to 50 `F2FPeerInfo` (pubkey, addresses, lastSeen, trustScore)
+  persisted in `localStorage.fodpr_f2f_peer_cache`
+- **Bootstrap**: invitation code (`f2finv1...` Bech32) or relay seed (`bootstrap()`)
+- **PeerList exchange**: on P2P connection, exchange `TransTypePeerList` (0x09) /
+  `MsgTypePeerListPush` (0x87) signed peer lists (max 50). Receiver merges cache
+  and auto-dials unconnected peers up to 50 connections
+- **WoT introduction**: `MsgTypeWoTIntroPush` (0x88) introduces new peers from
+  trusted contacts (trustScore inheritance)
+- **Groups**: host-guest star topology (`TransTypeGroup` persisted on relay). Host failover (`group_host_changed`)
 
 ### Storage (server.nim in FodprRelay)
 

@@ -1,11 +1,12 @@
 # Package
 
-version       = "0.4.0"
+version       = "0.5.0"
 author        = "LunaYoineko"
 description   = "Fully Open Decentralized Protocol"
 license       = "MIT"
 srcDir        = "src"
 
+bin           = @["server"]
 
 # Dependencies
 

@@ -8,3 +8,4 @@ nimbledeps
 /bin
 /examples/protocol_demo
 /examples/fodpr_client
+/examples/f2f_client
