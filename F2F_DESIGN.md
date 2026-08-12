@@ -26,7 +26,7 @@ v0.6 で削除されたもの:
 
 ## 3. 身元信頼とネットワーク信頼性
 各ピアに以下 2 つのスコアを付与 (`protocol.nim`)。
-- **identityTrust** (0.0 ~ 1.0): 公開鍵による**取得元（issuer）での身元信頼度**。新規ピアはスコア 0.0 から開始。
+- **identityTrust** (0.0 ~ 1.0): 公開鍵による**取得元（issuer）での身元信頼度**。新規ピアはスコア 0.0 から開始。現在は参考情報として保持される。判定ロジックには使用しない。
 - **reliabilityScore** (0.0 ~ 1.0): ネットワーク接続実績・安定性。接続成功で上昇、失敗/タイムアウトで低下。
 
 **2 スコア分離の利点**:
@@ -50,8 +50,8 @@ WoT 紹介 (`MsgTypeWoTIntro(0x08/0x88)`) で紹介者の identityTrust をベ�
 - **expiresAt**: 有効期限 (uint64, ビッグエンディアン)。紹介はこのタイムスタント以降無効。
 
 距離減衰数学的モデル:
-- 信頼伝播: `reliabilityScore = introducer.reliabilityScore * pathDecay ^ hopCount`
-- pathDecay は 0.9 程度が推奨 (1 hop で 10% 減衰, 2 hop で 19% 減衰)。
+
+- **WoT紹介は発見と来歴の記録のみ。reliabilityScoreは紹介で変更されない**。
 - expiresAt (秒単位) で紹介の有効期限を設定。古い紹介は無視され、新しい紹介が採用される。
 
 受信側は hopCount と pathDecay を計算し、信頼閾値を下回る紹介は接続対象外とする。
