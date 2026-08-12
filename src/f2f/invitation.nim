@@ -52,14 +52,17 @@ proc decodeInvitation*(code: string): InvitationCode =
 
 # インビテーションコード検証
 # - 署名検証
-# - 有効期限チェック
+# - 有効期限チェック (clock drift ±MaxClockDriftSeconds を許容)
 # - バージョンチェック
 proc verifyInvitation*(inv: InvitationCode): bool =
   if inv.version != INVITATION_VERSION:
     return false
   let now = uint64(epochTime())
-  if now > inv.expiresAt:
+  # Clock drift tolerance: reject only if clock is ahead by more than MaxClockDriftSeconds
+  # i.e., if now - drift >= expiresAt, it's definitely expired even with max clock ahead
+  if now - MaxClockDriftSeconds >= inv.expiresAt:
     return false
+  # Otherwise, drift zone or still valid - accept (drift could explain the apparent expiry)
   if inv.scope > INVITATION_SCOPE_WOT:
     return false
   return protocol.verifyInvitation(inv)

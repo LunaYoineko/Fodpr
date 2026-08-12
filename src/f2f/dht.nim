@@ -18,6 +18,13 @@ const
   K_BUCKET_SIZE = 20      # 各バケットの最大ノード数
   MIN_TRUST_DEFAULT = 0.0 # デフォルトの最小信頼スコア (WoT ゲート)
   DHT_RPC_TIMEOUT_MS = 5000
+  # Adaptive keepalive settings
+  MIN_PING_INTERVAL_MS* = 5000      # 最小PING間隔 (5秒)
+  MAX_PING_INTERVAL_MS* = 60000     # 最大PING間隔 (1分)
+  PING_SUCCESS_DECREASE* = 0.8      # 成功時の係数 (interval * この値)
+  PING_FAILURE_INCREASE* = 1.5      # 失敗時の係数 (interval / この値の逆)
+  PING_SUCCESS_THRESHOLD* = 3       # 連続成功でintervalを減衰
+  PING_FAILURE_THRESHOLD* = 3       # 連続失敗でintervalを増大
 
 type
   # Kademlia k-bucket
@@ -40,6 +47,11 @@ type
     kvStore*: Table[string, string]   # keyHex -> value
     pendingMsgId*: array[16, byte]    # 乱数メッセージID カウンタ
     minTrust*: float                  # WoT ゲート用最小信頼スコア
+    # Adaptive keepalive tracking
+    pingSuccessCount*: int            # 連続PING成功回数
+    pingFailureCount*: int            # 連続PING失敗回数
+    currentPingInterval*: uint64     # 現在のPING間隔 (ms)
+    lastPingTime*: uint64            # last PING送信時刻 (ms)
 
   # RPC 応答
   DhtResponse* = object
@@ -118,7 +130,11 @@ proc newDhtNode*(
     table: newRoutingTable(id),
     kvStore: initTable[string, string](),
     pendingMsgId: [0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    minTrust: minTrust
+    minTrust: minTrust,
+    pingSuccessCount: 0,
+    pingFailureCount: 0,
+    currentPingInterval: MIN_PING_INTERVAL_MS,
+    lastPingTime: 0
   )
 
 # ---------------------------------------------------------------------------
@@ -252,14 +268,49 @@ proc sendPing*(
   node: var DhtNode,
   conn: var F2FConnection
 ): Future[bool] {.async.} =
+  var now = uint64(epochTime())
+  # Adaptive interval: only send if enough time has passed
+  if node.lastPingTime > 0 and (now - node.lastPingTime) < node.currentPingInterval:
+    # not yet time for next PING - skip, return success (no-op)
+    return Promise(true)
+  
   var msg = DhtMessage(
     op: DhtOpPing,
     msgId: nextMsgId(node),
-    key: [0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    key: [0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     sender: node.localPubkey,
     signature: emptySignature()
   )
-  return await sendDhtRpc(node, conn, msg, MsgTypeDht)
+  let result = await sendDhtRpc(node, conn, msg, MsgTypeDht)
+  node.lastPingTime = now
+  return result
+
+# PING失敗時のフォールバック呼び出し (handleDhtMessage 内から呼ばれる)
+proc onPingFailed*(node: var DhtNode) =
+  updatePingInterval(node, false)
+
+# PING間隔の適応的更新
+proc updatePingInterval*(node: var DhtNode, success: bool) {.async.} =
+  if success:
+    node.pingSuccessCount += 1
+    node.pingFailureCount = 0
+    # 連続成功: インターバルをわずかに減衰 (最小値へ)
+    if node.pingSuccessCount >= PING_SUCCESS_THRESHOLD:
+      node.currentPingInterval = max(
+        MIN_PING_INTERVAL_MS,
+        cast[uint64](cast[float](node.currentPingInterval) * PING_SUCCESS_DECREASE)
+      )
+      node.pingSuccessCount = 0
+  else:
+    node.pingFailureCount += 1
+    node.pingSuccessCount = 0
+    # 連続失敗: インターバルを増大 (最大値まで)
+    if node.pingFailureCount >= PING_FAILURE_THRESHOLD:
+      node.currentPingInterval = min(
+        MAX_PING_INTERVAL_MS,
+        cast[uint64](cast[float](node.currentPingInterval) * PING_FAILURE_INCREASE)
+      )
+      node.pingFailureCount = 0
 
 # FIND_NODE: ターゲットノードIDに近いノードを探索
 proc sendFindNode*(

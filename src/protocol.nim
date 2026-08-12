@@ -39,6 +39,8 @@ import streams, endians, strutils, times, random
 import crypto, secp256k1
 import nimSHA2
 
+const MaxClockDriftSeconds* = 300  # ±5分以内のクロックドリフトを許容
+
 # メッセージ種別を表す定数。
 # 0x01〜0x04 はクライアント → サーバー、
 # 0x81〜0x82 はサーバー → クライアントの配信を表す。

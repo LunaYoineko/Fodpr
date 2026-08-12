@@ -23,6 +23,8 @@ const
   MIN_TRUST_SCORE = 0.05
   MAX_TRUST_SCORE = 1.0
   STALE_THRESHOLD_SEC* = 86400 * 7  # 7日間見られていなければ古いとみなす
+  # アクティブ接続の上限 (同時接続数のハードリミット)
+  MAX_ACTIVE_PEERS* = 15  # 同時接続ピア数の上限 (15-20推奨)
 
 type
   PeerCache* = object
@@ -232,3 +234,38 @@ proc getActivePeerCount*(cache: PeerCache): int =
     if now - p.lastSeen < STALE_THRESHOLD_SEC:
       inc(count)
   return count
+
+# アクティブ接続上限チェック: 上限を超えていれば信頼の低いピアを切断候補とする
+proc getLowestActivePeer*(cache: PeerCache): option[PeerInfo] =
+  let now = uint64(epochTime())
+  var lowest: option[PeerInfo] = none()
+  var lowestScore = 1.0
+  for p in cache.peers:
+    if now - p.lastSeen < STALE_THRESHOLD_SEC:
+      if p.trustScore < lowestScore:
+        lowestScore = p.trustScore
+        lowest = some(p)
+  return lowest
+
+# アクティブ接続上限チェック: 上限を超えていれば古い/信頼の低いピアを切断
+proc checkActivePeerLimit*(cache: PeerCache): PeerCache =
+  if cache.peers.len <= MAX_ACTIVE_PEERS:
+    return cache
+  
+  # アクティブピア数をカウント
+  var activeCount = getActivePeerCount(cache)
+  if activeCount <= MAX_ACTIVE_PEERS:
+    # 古いピアでクリーンアップが十分なら何もしない
+    return cache
+  
+  # 切断候補 (信頼スコアが最低のアクティブピア) を特定
+  var disconnected = getLowestActivePeer(cache)
+  if disconnected.isSome:
+    var updated = cache
+    # キャッシュから削除 (LRU的動作)
+    updated.peers = updated.peers.filterIt(it.pubkey != disconnected.value.pubkey)
+    updated.lastUpdated = uint64(epochTime())
+    echo "Active peer limit (MAX_ACTIVE_PEERS=$MAX_ACTIVE_PEERS) exceeded, disconnected least-reliable peer"
+    return updated
+  
+  return cache
