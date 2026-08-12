@@ -13,6 +13,6 @@
 ## クライアントのサンプル実装は examples/fodpr_client.nim を参照。
 
 import protocol, crypto, envelope
-import f2f/peer_cache, f2f/discovery, f2f/bootstrap, f2f/wot, f2f/invitation, f2f/signaling, f2f/transport, f2f/group
+import f2f/peer_cache, f2f/discovery, f2f/bootstrap, f2f/wot, f2f/invitation, f2f/signaling, f2f/transport, f2f/dht
 
-export protocol, crypto, envelope, peer_cache, discovery, bootstrap, wot, invitation, signaling, transport, group
+export protocol, crypto, envelope, peer_cache, discovery, bootstrap, wot, invitation, signaling, transport, dht

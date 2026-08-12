@@ -2,7 +2,8 @@
 ## F2F: P2Pシグナリングモジュール (リレー非依存)
 ##
 ## WebRTCシグナリングを確立済みP2Pデータチャネル経由で直接行う。
-## 既存の TransTypeWebRTC / MsgTypeSignal はシード/リレー用として残す。
+## リレーは存在しないため、シグナリングは常に FodprSignal (MsgTypeSignal)
+## を P2P データチャネル経由で送受信する。
 
 import asyncdispatch, ws, json, strutils, streams, times
 import protocol, crypto, options, transport
@@ -94,7 +95,7 @@ proc jsonToSessionDescription(node: JsonNode): SessionDescription =
   )
 
 # ---------------------------------------------------------------------------
-# 公開 API: F2FSignal 作成・送信
+# 公開 API: FodprSignal 作成・送信
 # ---------------------------------------------------------------------------
 
 # F2F Offer 作成
@@ -102,16 +103,15 @@ proc createF2FOffer*(
   priv: SkSecretKey,
   target: SkPublicKey,
   sdp: string
-): F2FSignal =
-  var signal = F2FSignal(
+): FodprSignal =
+  var signal = FodprSignal(
     signalType: SignalOffer,
     sender: priv.toPublicKey(),
     target: target,
     content: sdp,
-    signature: emptySignature(),
-    viaRelay: false
+    signature: emptySignature()
   )
-  signal.signature = signF2FSignal(priv, signal)
+  signal.signature = signSignal(priv, signal)
   return signal
 
 # F2F Answer 作成
@@ -119,16 +119,15 @@ proc createF2FAnswer*(
   priv: SkSecretKey,
   target: SkPublicKey,
   sdp: string
-): F2FSignal =
-  var signal = F2FSignal(
+): FodprSignal =
+  var signal = FodprSignal(
     signalType: SignalAnswer,
     sender: priv.toPublicKey(),
     target: target,
     content: sdp,
-    signature: emptySignature(),
-    viaRelay: false
+    signature: emptySignature()
   )
-  signal.signature = signF2FSignal(priv, signal)
+  signal.signature = signSignal(priv, signal)
   return signal
 
 # F2F ICE Candidate 作成
@@ -136,28 +135,27 @@ proc createF2FCandidate*(
   priv: SkSecretKey,
   target: SkPublicKey,
   candidate: IceCandidate
-): F2FSignal =
+): FodprSignal =
   let content = $iceCandidateToJson(candidate)
-  var signal = F2FSignal(
+  var signal = FodprSignal(
     signalType: SignalCandidate,
     sender: priv.toPublicKey(),
     target: target,
     content: content,
-    signature: emptySignature(),
-    viaRelay: false
+    signature: emptySignature()
   )
-  signal.signature = signF2FSignal(priv, signal)
+  signal.signature = signSignal(priv, signal)
   return signal
 
 # F2Fシグナリングメッセージを送信 (P2Pデータチャネル経由)
 proc sendF2FSignal*(
   dataChannel: WebRTCDataChannel,
-  signal: F2FSignal
+  signal: FodprSignal
 ): Future[bool] {.async.} =
   try:
-    let encoded = encodeF2FSignal(signal)
+    let encoded = encodeSignal(signal)
     # F2Fデータチャネルメッセージとして送信
-    # MsgTypeData (0x06) + TransTypeF2FSignal (8) でラップ
+    # MsgTypeData (0x06) でラップ
     var packet = ""
     packet.add(MsgTypeData)
     packet.add(encoded)
@@ -170,29 +168,29 @@ proc sendF2FSignal*(
 # F2Fシグナリングメッセージを受信・検証
 proc receiveF2FSignal*(
   dataChannel: WebRTCDataChannel
-): Future[Option[F2FSignal]] {.async.} =
+): Future[Option[FodprSignal]] {.async.} =
   try:
     let packet = await dataChannel.receive()
     if packet.len < 2:
-      return none(F2FSignal)
+      return none(FodprSignal)
 
     # 先頭バイトが MsgTypeData (0x06) かチェック
     if byte(packet[0]) != byte(MsgTypeData):
-      return none(F2FSignal)
+      return none(FodprSignal)
 
-    # 残りを F2FSignal としてデコード
+    # 残りを FodprSignal としてデコード
     var strm = newStringStream(packet[1..^1])
-    let signal = decodeF2FSignal(strm)
+    let signal = decodeSignal(strm)
 
     # 署名検証
-    if not verifyF2FSignal(signal):
+    if not verifySignal(signal):
       echo "F2F signal signature verification failed"
-      return none(F2FSignal)
+      return none(FodprSignal)
 
     return some(signal)
   except Exception as e:
     echo "Failed to receive F2F signal: ", e.msg
-    return none(F2FSignal)
+    return none(FodprSignal)
 
 # ---------------------------------------------------------------------------
 # シグナリングセッション管理
@@ -232,7 +230,7 @@ proc sendOffer*(
 # Offer 受信処理
 proc handleOffer*(
   session: var SignalingSession,
-  signal: F2FSignal
+  signal: FodprSignal
 ): Option[SessionDescription] =
   if signal.signalType != SignalOffer:
     return none(SessionDescription)
@@ -257,7 +255,7 @@ proc sendAnswer*(
 # Answer 受信処理
 proc handleAnswer*(
   session: var SignalingSession,
-  signal: F2FSignal
+  signal: FodprSignal
 ): Option[SessionDescription] =
   if signal.signalType != SignalAnswer:
     return none(SessionDescription)
@@ -281,7 +279,7 @@ proc sendCandidate*(
 # ICE Candidate 受信処理
 proc handleCandidate*(
   session: var SignalingSession,
-  signal: F2FSignal
+  signal: FodprSignal
 ): Option[IceCandidate] =
   if signal.signalType != SignalCandidate:
     return none(IceCandidate)
@@ -294,7 +292,7 @@ proc handleCandidate*(
 # シグナリングメッセージの統合ハンドラ
 proc handleF2FSignal*(
   session: var SignalingSession,
-  signal: F2FSignal
+  signal: FodprSignal
 ): tuple[handled: bool, action: string] =
   session.lastActivity = uint64(epochTime())
 

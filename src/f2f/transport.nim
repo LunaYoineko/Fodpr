@@ -467,7 +467,7 @@ proc startIpv6Rotation*(
 
     # 実際の実装では:
     # 1. 新しいアドレスで ICE 再交渉
-    # 2. 相手にも新しいアドレスを通知 (SignalHostChange 等)
+    # 2. 相手にも新しいアドレスを通知 (FodprSignal の Candidate で通知)
     # 3. 切り替え完了まで古いアドレスも維持
 
     conn.localIpv6Temp = newAddr.address

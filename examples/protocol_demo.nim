@@ -6,7 +6,7 @@
 ##   2. 送信タイプ (TransTypeJSON / String / Binary) ごとの署名付きイベント作成
 ##   3. encodeEvent → decodeEvent によるエンコード / デコード (ラウンドトリップ)
 ##   4. 署名検証 (verifyContent)
-##   5. 購読要求 (FodprReq) の encodeReq / decodeReq
+##   5. DHT メッセージ (DhtMessage) の署名・エンコード / デコード・検証
 ##
 ## ビルド/実行:
 ##   nim c -r examples/protocol_demo.nim   (ルートディレクトリで実行)
@@ -79,27 +79,35 @@ proc main() =
   echo "署名検証の結果: ", valid
 
   # ------------------------------------------------------------------
-  # 5. 購読要求 (REQ) のエンコード / デコード
+  # 5. DHT メッセージ (Kademlia over WebRTC) のエンコード / デコード
   # ------------------------------------------------------------------
   echo ""
-  echo "=== 5. REQ エンコード / デコード ==="
-  let req = FodprReq(
-    subId: "sub_1",
-    transType: TransTypeAll,
-    tagKey: "p",
-    tagVal: "target_user"
+  echo "=== 5. DHT メッセージ エンコード / デコード ==="
+  # FIND_NODE 要求を作成し、署名する
+  var msgId: array[16, byte]
+  for i in 0..<16: msgId[i] = byte(i)
+  var key: array[32, byte]
+  for i in 0..<32: key[i] = byte(255 - i)
+  var dhtMsg = DhtMessage(
+    op: DhtOpFindNode,
+    msgId: msgId,
+    key: key,
+    sender: kp.publicKey,
+    signature: emptySignature()
   )
-  # REQ をバイナリ列へ変換してから復元する
-  # (encodeReq は先頭に種別バイト MsgTypeReq を付与するため、
-  #  デコード前に読み飛ばす)
-  let reqEnc = encodeReq(req)
-  var reqStrm = newStringStream(reqEnc)
-  discard reqStrm.readChar()  # 種別バイトを読み飛ばし
-  let reqDec = decodeReq(reqStrm)
-  echo "subId    : ", reqDec.subId
-  echo "transType: ", transTypeName(reqDec.transType)
-  echo "tagKey   : ", reqDec.tagKey
-  echo "tagVal   : ", reqDec.tagVal
+  dhtMsg.signature = signDht(kp.privateKey, dhtMsg)
+  echo "Op         : ", dhtOpName(dhtMsg.op)
+
+  # 署名付き DHT メッセージをバイナリ列へ変換し、ストリームから復元する
+  let dhtEnc = encodeDht(dhtMsg)
+  var dhtStrm = newStringStream(dhtEnc)
+  let dhtDec = decodeDht(dhtStrm)
+  echo "Op (復元後): ", dhtOpName(dhtDec.op)
+  echo "MsgId一致  : ", dhtDec.msgId == dhtMsg.msgId
+  echo "Key一致    : ", dhtDec.key == dhtMsg.key
+
+  # 署名検証 (sender の公開鍵で検証)
+  echo "署名検証    : ", verifyDht(dhtDec)
 
   echo ""
   echo "サンプル実行完了！"
