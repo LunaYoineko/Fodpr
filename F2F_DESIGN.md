@@ -26,7 +26,7 @@ v0.6 で削除されたもの:
 
 ## 3. 身元信頼とネットワーク信頼性
 各ピアに以下 2 つのスコアを付与 (`protocol.nim`)。
-- **identityTrust** (0.0 ~ 1.0): 公開鍵による身元信頼度。新規は最小値から開始。
+- **identityTrust** (0.0 ~ 1.0): 公開鍵による**取得元（issuer）での身元信頼度**。新規ピアはスコア 0.0 から開始。
 - **reliabilityScore** (0.0 ~ 1.0): ネットワーク接続実績・安定性。接続成功で上昇、失敗/タイムアウトで低下。
 
 **2 スコア分離の利点**:
@@ -37,18 +37,6 @@ WoT 紹介 (`MsgTypeWoTIntro(0x08/0x88)`) で紹介者の identityTrust をベ�
 
 ## 4. 最大 50 件のキャッシュ上限 (LRU + スコア順)
 `peer_cache.nim` (ファイル) に永続化。`selectPeers` はスコア順で選択、古い物から LRU 削除。再起動時にキャッシュから即座に自動ダイヤル開始。
-
-## 5. モバイル回線 (au/Rakuten 等) 上の P2P 接続可能性 ⚓
-
-- **確認**: GodotEngineのWebRTC `DataChannel`を使用したオブジェクト同期テスト済み
-- **au 回線**: IPv6一時アドレスでのダイヤル成功。CGNAT下でもピンホール確率が比較的高く、P2P接続が成立する。
-- **Rakuten 回線**: IPv6一時アドレスでのダイヤル成功。au同様に比較的良好なP2P接続環境。
-- **モバイルP2Pの特徴**:
-  - モバイル回線はCGNAT的構成でインバウンドが困難だが、IPv6一時アドレスとWebRTC DataChannelを使用したアウトバウンド接続は比較的安定する。
-  - ダイヤル成功後は直接P2P通信が可能。リレーを介さなくてもデータ同期が続く。
-  - 接続確立にはSTUNでのNATタイプ検出が有効。Google STUN (`stun.l.google.com:19302`) での検出実績あり。
-  - **設計上の意義**: モバイルユーザーの参加を可能にし、メッシュの参加者プールを拡大。地域分断リスクの低減に寄与.
-
 
 ## 5. WoT 紹介 (WoT Introduction) with Distance Decay
 信頼できるピアから `MsgTypeWoTIntroPush` で新ピアを紹介 (`f2f/discovery.nim:processWoTIntroduction`)。
@@ -69,10 +57,10 @@ WoT 紹介 (`MsgTypeWoTIntro(0x08/0x88)`) で紹介者の identityTrust をベ�
 受信側は hopCount と pathDecay を計算し、信頼閾値を下回る紹介は接続対象外とする。
 
 ## 6. Kademlia DHT によるピア発見と IP 解決
-256ビット ID (`nodeId = SHA-256(compressed pubkey)`)、k-buckets ルーティングテーブル (`f2f/dht.nim`)。`PING` / `FIND_NODE` / `FIND_VALUE` / `STORE` を **データチャネル上** で RPC。`FIND_VALUE` により公開鍵 → IPv6 の解決。ルーティングテーブルは少なくとも 1 つの メッシュ隣接が生きていれば生存する。
+256ビット ID (`nodeId = SHA-256(compressed pubkey)`)、k-buckets ルーティングテーブル (`f2f/dht.nim`)。`PING` / `FIND_NODE` / `FIND_VALUE` / `STORE` を **データチャネル上** で RPC。`FIND_VALUE` により公開鍵 → IPv6 の解決。**（現状アンカーがあるため、データチャネル上のみで動作）**。ルーティングテーブルは少なくとも 1 つの メッシュ隣接が生きていれば生存する。
 
 ## 7. ゴシップによるイベント同期
-署名済みイベントをメッシュ隣接へ `MsgTypeEvent(0x01)` でフラッシュ。ホップ制限 (`MAX_HOPS=2`)、`Set<eventIdHex>` で重複排除。直接 P2P メッセージは `FodprData` (`TransTypeSigned` 等) で運ぶ。
+署名済みイベントをメッシュ隣接へ `MsgTypeEvent(0x01)` でフラッシュ。ホップ制限 (`MAX_HOPS=2`)、**今後増やす予定**。`Set<eventIdHex>` で重複排除。直接 P2P メッセージは `FodprData` (`TransTypeSigned` 等) で運ぶ。
 
 ## プロトコルフロー
 ```
@@ -125,7 +113,7 @@ interface F2FPeerInfo {
 - `invitationId`: anti-reuse 用ランダム 16 バイト (1 回限り利用)
 - `usedAt`: 使用時刻 (uint64)。同じ invitationId が 2 回使われると無効。
 - `scope`: 0 = 単発接続, 1 = WoT 招待 (キャッシュ共有含む)。
-anti-reuse メカニズム: `usedAt` タイムスタンプを記録し、同じ invitationId が既に使用されている場合は拒否。
+- **招待コードはブートストラップにのみ必要**: 通常時は既存ピアからWoTキャッシュを介して接続可能。新規参入時のみブートストラップ段階で使用する。
 
 ## DHT メッセージ — `MsgTypeDht (0x0B)` / `MsgTypeDhtNodes (0x8B)` / `MsgTypeDhtValue (0x8C)` (`f2f/dht.nim`)
 ```typescript
@@ -173,11 +161,12 @@ interface DhtNodeInfo {
 | `f2f/transport.nim` | WebRTC データチャネル send/receive, IPv6 プレフィックス + インターフェース ID 生成 |
 | `f2f/bootstrap.nim` | 設定シードノード (`fpub1...@[ipv6]:port`) からのブートストラップ |
 | `f2fMesh.ts` (TS) | メッシュマネージャ: WebRTC ピア接続 / ダイヤル / ゴシップ / **GeoIP 多様性選抜** / ビルトインアンカー (`FODPR_BOOTSTRAP_ANCHORS`) |
+| TypeScript SDK: WebUI/CLI用。実装の大元はNim (`src/`) |
 
 ## 運用上の考慮点
 
 1. **初回ブートストラップ (リレーなし)**
-   - 完全新規ユーザーは招待コード (`f2finv1...`, `f2f/invitation.nim`) か、設定シードノード (`f2f/bootstrap.nim`) から開始。
+    - 完全新規ユーザーは招待コード (`f2finv1...`, `f2f/invitation.nim`) か、設定シードノード (`f2f/bootstrap.nim`) から開始。招待コードの`faucetサイト`は誰でも作成可能。
    - 設定・キャッシュが**共に空の完全孤立**時は **ビルトインコミュニティアンカー** (`FODPR_BOOTSTRAP_ANCHORS` / `f2fMesh.ts` に定義) へ**自動フォールバック**とダイヤル (`Bitcoin DNS seed / IPFS bootnodes` 方式)。アンカーは信頼済み (trustScore 1.0) 扱い。
    - 明示アドレス (招待/シード/手動 IP/ビルトインアンカー)は **WoT ゲートをバイパスし直接ダイヤル可能** (信頼済みピア)。アンカーを 1 本繋ぐと DHT が残りのグラフを解決する。
    - 到達不能時は手動 IPv6 入力でフォールバック。
