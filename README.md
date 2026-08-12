@@ -1,88 +1,117 @@
-# Fodpr（ふぉどぷる）
+# Fodpr（ふぉどぷる） — v0.6 "Mesh"
 
-**Fully Open Decentralized Protocol**
+**Fully Open Decentralized Protocol — P2P Mesh Edition**
 
-Fodpr（ふぉどぷる）は、SNS のような「投稿」を、特定の会社やサービスに依存せずに
-やりとりするための**プロトコル**（通信の約束事）です。投稿（**イベント**）を
-**リレーサーバー**という中継所を通して送受信します。
+Fodpr（ふぉどぷる）は、SNS のような「投稿」を、特定の会社やサービス・リレーサーバーに依存せずにやりとりするための**完全 P2P メッシュプロトコル**です。投稿（**イベント**）は **WebRTC データチャネル**上でピア間（F2F）に直接やりとりされます。
 
 > 英語版は [README.en.md](README.en.md) をご覧ください。
 > English version is available at [README.en.md](README.en.md)
 
 ---
 
+## v0.6 "Mesh" で変わったこと
+
+| 項目 | v0.5 以前 (Relay) | v0.6 "Mesh" |
+|------|-------------------|-------------|
+| **アーキテクチャ** | リレーサーバー経由 / ホスト昇格型 P2P | **完全 P2P メッシュ (リレーなし、ホストなし)** |
+| **接続形態** | Client ↔ Relay / Star topology | **F2F (Friend-to-Friend) メッシュ** |
+| **IP 発見** | リレーが仲介 / 固定アドレス | **Kademlia DHT over WebRTC データチャネル** (SHA-256(pubkey) = nodeId) |
+| **信頼モデル** | リレー信頼 / ホスト信頼 | **WoT (Web of Trust) スコアゲート** (最小スコア開始、閾値到達でダイヤル) |
+| **ブートストラップ** | リレーのシード / 招待 | **招待コード `f2finv1...` / 設定シードノード / 手動 IP / ビルトインアンカー** |
+| **メッセージング** | リレー経由 PUSH / WebRTC シグナリング | **ゴシップ (MAX_HOPS=2, eventId 重複排除) / FodprData 直接 P2P** |
+| **リレーサーバー** | 必須 (FodprRelay) | **不要・廃止** |
+| **ホスト昇格 (RtcGroup)** | 有り | **廃止** |
+
+---
+
 ## Fodpr でできること
 
-- **だれもが自由に使える**
-  オープンなルールで動くため、特定の企業やサービスに縛られません。
+- **だれもが自由に使える** — オープンなルールで動くため、特定の企業やサービスに縛られません。
+- **なりすまし・改ざんを防げる** — 投稿には「電子署名」が付いており、本人が書いたものか、書き換えられていないかをだれでも確認できます。
+- **サーバーが 1 台にも依存しない** — **リレーサーバーは存在しません**。すべての接続はピア間 (F2F) の WebRTC データチャネルです。
+- **投稿の形式を自由に選べる** — JSON（構造化データ）/ 文字列 / バイナリ（画像など）の 3 種類から投稿者が自由に選べます。
+- **メタデータまで守れる（全体署名）** — 「全体署名」イベント（`TransTypeSigned`）を使うと、本文だけでなく送信日時・公開鍵・タグも含めて署名できます。イベント ID で特定イベントを一意に参照できます。
+- **宛先別に暗号化できる（E2EE エンベロープ）** — 暗号化イベント（`TransTypeEncrypted`）は、本文を AES-256-GCM で暗号化した「エンベロープ」を content に載せます。受信者ごとに鍵をラップするので、宛先にした本人だけが本文を復号できます（gift-wrap 相当）。
 
-- **なりすまし・改ざんを防げる**
-  投稿には「電子署名」が付いており、本人が書いたものか、書き換えられていないかを
-  だれでも確認できます。
+---
 
-- **サーバーが 1 台に依存しない**
-  リレーサーバーはだれでも立てられます。ひとつのサーバーが停止しても、
-  ほかのサーバーがあればやりとりは続きます。
+## v0.6 核心技術スタック
 
-- **投稿の形式を自由に選べる**
-  投稿の形式は、JSON（構造化データ）/ 文字列 / バイナリ（画像などのデータ）の
-  3 種類から、投稿する人が自由に選べます。
+### 1. F2F メッシュ + WebRTC データチャネル
+- すべての接続はクライアント間 (F2F) の **WebRTC データチャネル**。
+- ホスト/星形トポロジは廃止。すべてのピアはメッシュの隣接ピア群へ直接接続。
+- 最大 50 接続まで連鎖的に拡大。
 
-- **メタデータまで守れる（全体署名）**
-  「全体署名」イベント（TransTypeSigned）を使うと、本文だけでなく
-  送信日時・公開鍵・タグも含めて署名できます。リレーによる
-  メタデータの改ざんを検出でき、イベント ID で特定イベントを
-  一意に参照できます（メールのスレッド参照などの土台）。
+### 2. Kademlia DHT over WebRTC
+- **ノード ID = SHA-256(compressed pubkey)** (256 ビット)。
+- k-buckets ルーティングテーブル、`PING` / `FIND_NODE` / `FIND_VALUE` / `STORE` をデータチャネル上で RPC。
+- `FIND_VALUE` で公開鍵 → IPv6 アドレスを解決し直接ダイヤル。
 
-- **宛先別に暗号化できる（E2EE エンベロープ）**
-  暗号化イベント（TransTypeEncrypted）は、本文を AES-256-GCM で暗号化した
-  「エンベロープ」を content に載せます。受信者ごとに鍵をラップするので、
-  宛先にした本人だけが本文を復号できます（gift-wrap 相当）。
-  リレーは構造だけを検証し、内容は復号できません。
+### 3. WoT (Web of Trust) 信頼ゲート
+- 各ピアに `0.0 ~ 1.0` のスコア。新規/未検証ピアは **最小スコアから開始**。
+- スコアが **閾値 (デフォルト 0.0) に達したピアのみダイヤル**。
+- WoT 紹介 (`MsgTypeWoTIntroPush`) で紹介者の信頼を継承。
+- 接続成功で上昇、失敗で低下、時間経過で減衰 (`decayTrustScores`)。
 
-  - **読む人を認証できる（読取認証）**
-    宛先限定イベント（`to:<fpub>` タグ）は、その宛先本人として
-    チャレンジ認証（NIP-42 相当の AUTH）を通した購読にだけ配信されます。
+### 4. ゴシップによるイベント同期
+- 署名済みイベントをメッシュ隣接へ `MsgTypeEvent(0x01)` でフラッシュ。
+- ホップ制限 (`MAX_HOPS=2`)、`Set<eventIdHex>` で重複排除。
+- 直接 P2P メッセージは `FodprData` (`TransTypeSigned` 等) で運ぶ。
 
-  - **WebRTC シグナリング**
-    `TransTypeWebRTC`（6）でシグナリング専用チャネルを確立し、SDP/ICE candidate
-    （IPv6 一時アドレスを含む）を secp256k1 署名付きで中継します。
-    シグナリングメッセージは保存されず（即座に中継）、P2P 接続確立後は
-    リレーを通りません。ホスト-ゲスト星形トポロジで自動ホスト昇格機能付き。
+### 5. ブートストラップ (リレーなし)
+- **招待コード** (`f2finv1...` Bech32) — 知人から受け取り即ダイヤル。
+- **設定シードノード** (`fpub1...@[ipv6]:port`) — `fodpr_bootstrap_nodes` に登録。
+- **手動 IP 入力** — 直接 IPv6 アドレスを指定。
+- **ビルトインコミュニティアンカー** (`FODPR_BOOTSTRAP_ANCHORS`) — 完全孤立時に自動フォールバック (Bitcoin DNS seed / IPFS bootnodes 方式)。
 
-- **F2F (Friend-to-Friend) / WoT (Web of Trust) P2P**
-  - 知り合い経由でピアを発見し、最大 50 件までピアキャッシュ（`localStorage`）を保存
-  - 招待コード (`f2finv1...` Bech32) で初回接続、またはリレーのシード機能でブートストラップ
-  - P2P 接続確立時に **署名付き PeerList** (`TransTypePeerList` / `MsgTypePeerListPush`) を
-    相互交換し、キャッシュをマージして未接続ピアへ自動ダイヤル（リレー不要）
-  - 紹介 (`MsgTypeWoTIntroPush`) で新ピアを発見・信頼スコア更新
+### 6. IPv6 一時アドレス + プライバシー
+- IPv6 一時アドレス (RFC 4941 / RFC 8981) を `addresses` に含め、接続ごとにローテーション。
+- `/64` プレフィクスで ISP 割り当て単位を判定し GeoIP で国コードを推定。
 
-- **RtcGroup (ホスト昇格型 P2P)**
-  - 最初の接続者がホスト、他はホストへ星形接続。ホスト切断時に最古参加者が自動昇格
-  - `HOST_CHANGE: <new_fpub>` テキスト通知で全員再接続
-  - グループ状態は `TransTypeGroup` (`group:<groupId>` タグ) でリレーに永続化
+### 7. GeoIP ベース接続多様性
+- ダイヤル候補選抜時に **国ごとに最大 2 本を優先確保**。
+- 残りはグローバル信頼順。GeoIP 失敗は 'XX' バケツで信頼順フォールバック。
+
+---
+
+## IPv6 インバウンドブロッキングの現状と対策 ⚠️
+
+**重要:** 一般的な家庭用インターネット接続では、IPv6 インバウンド接続が **デフォルトでブロック** されていることが多いです。
+
+### 現状
+| 環境 | インバウンド IPv6 | 備考 |
+|------|------------------|------|
+| **一般家庭用ルーター (ISP 提供/市販)** | **デフォルト遮断** が多数 | Verizon, AT&T などの ISP 提供 CPE は IPv6 ファイアウォールでインバウンドを遮断。手動で「ピンホール/ポート開放」が必要。 |
+| **Unifi / pfSense / OPNsense 等** | デフォルト遮断 | 明示的な「External → Internal」IPv6 ファイアウォールルール追加まで到達不能。 |
+| **ISP 側での遮断** | 一部 ISP で遮断 | AT&T などはプロトコル 41 (6in4 トンネル) を遮断する事例あり。ネイティブ IPv6 でもインバウンド遮断のケースあり。 |
+| **モバイル回線 (4G/5G)** | ほぼ遮断 | CGNAT 的な構成でインバウンド不可。IPv6 アドレスが割り当てられても到達不能。 |
+| **データセンター / VPS / クラウド** | **到達可能** | 適切なファイアウォール設定さえあればネイティブ IPv6 インバウンドが通る。 |
+
+### 影響
+- **Fodpr メッシュでは「インバウンドを受け入れられるピアが最低 1 つ」必要**です。完全に遮断された環境同士では直接接続できません。
+- 現状、WebRTC の ICE/STUN で NAT トラバーサルを試みますが、ステートフルファイアウォールでインバウンドが遮断されている場合は **シグナリング経由のフォールバック** (既接続メッシュピアを中継) に頼ります。
+
+### 対策・推奨設定
+1. **ルーターの IPv6 ファイアウォールで「ピンホール/ポート開放」** を設定 (対象ポート: WebRTC 用 UDP 範囲、または全 IPv6 UDP 一時許可)。
+2. **Unifi 等の場合**: `IPv6 Firewall` → `WAN_IN` に `Action: Accept` / `Protocol: All` / `Source: Any` / `Destination: Internal Network` ルールを追加。
+3. **モバイル/遮断環境では**: 到達可能なピア (VPS, データセンター, IPv6 開放済み自宅) を **ブートストラップノード/アンカー** として登録し、そこを経由してメッシュに参加。
+4. **ICE/STUN サーバー** をクライアント設定で指定 (Google `stun:stun.l.google.com:19302` 等) し、NAT トラバーサル成功率を上げる。
+5. **ICMPv6 (Packet Too Big 等) はフィルタしない** — PMTU 発見が動かなくなり、大容量転送が失敗する原因になります。
+
+> **参考文献**: "Where Have All the Firewalls Gone? Security Consequences of Residential IPv6 Transition" (arXiv:2509.04792, 2025) — 数百万の住宅 IPv6 ホストがステートフルファイアウォールなしで公開されている実態を大規模測定。NAT が事実上のファイアウォールだったことが判明。
+
+---
 
 ## しくみをひとことで
 
-まるで郵便のしくみに似ています。「リレーサーバー」は郵便局、「イベント」は手紙、
-「電子署名」は本人の印鑑のようなものです。
+v0.5 までは「郵便局 (リレーサーバー) 経由」でしたが、v0.6 からは **「知り合いの家を訪ねて手紙を直接渡す」** イメージです。
 
-1. **投稿する** — 投稿者が電子署名を付けて投稿をリレーサーバーへ送る
-2. **保存する** — リレーサーバーが署名をチェックして投稿を保管する
-3. **頼む** — 読む人が「この種類の投稿をください」とリレーサーバーへ頼む
-4. **受け取る** — リレーサーバーが該当する投稿をリアルタイムに届ける
-
-## よく出てくる言葉
-
-| 用語             | よみ         | やさしい説明                                       |
-|------------------|--------------|----------------------------------------------------|
-| プロトコル       | ぷろとこる   | コンピューター同士がやりとりするときの「約束事」     |
-| イベント         | いべんと     | 投稿ひとつぶんのデータ                             |
-| リレーサーバー   | りれーさーばー | 投稿を預かって配達する「中継所」                  |
-| クライアント     | くらいあんと | Fodpr を利用するアプリやツール                    |
-| 公開鍵・秘密鍵   | こうかいかぎ・ひみつかぎ | 自分を証明するための「鍵」のペア       |
-| 電子署名         | でんししょめい | 本人だけが作れる「電子サイン」                    |
-| 購読（REQ）      | こうどく     | 「この投稿をください」とリレーサーバーへ頼むこと    |
+1. **最初の 1 人** と繋ぐ — 招待コード / 設定シードノード / ビルトインアンカーのいずれかで最初のピアと F2F 接続確立。
+2. **署名付き PeerList** を交換 — 相手の知り合い (最大 50 件) を教えてもらい、WoT スコア閾値を超える相手へ自動ダイヤル。
+3. **メッシュ形成** — 最大 50 接続まで連鎖的に拡大。以降はリレーなしで直接通信。
+4. **DHT で IP 解決** — 公開鍵を鍵に `FIND_VALUE` を発行し、相手の IPv6 を解決して直接ダイヤル。
+5. **ゴシップで同期** — 署名済みイベントを隣接へフラッシュ (MAX_HOPS=2)。eventId で重複排除。
+6. **WoT で質維持** — 紹介で信頼を引き継ぎ、接続成功でスコア上昇、失敗で低下、時間で減衰。
 
 ---
 
@@ -91,442 +120,177 @@ Fodpr（ふぉどぷる）は、SNS のような「投稿」を、特定の会�
 ### 必要なもの
 
 - [Nim](https://nim-lang.org/) 2.2.10 以上
-- [Nimble](https://github.com/nim-lang/nimble)（依存ライブラリのインストールに使用）
-- リレーサーバーをネイティブ実行する場合は、FodprRelay 側で LMDB の
-  ランタイムライブラリ（Debian/Ubuntu では `liblmdb0`）が必要
-- Docker でリレーサーバーを実行する場合は
-  [Docker Engine](https://docs.docker.com/engine/) と
-  [Docker Compose](https://docs.docker.com/compose/)
+- [Nimble](https://github.com/nim-lang/nimble)
+- (Web クライアント開発時) Node.js 20+ / pnpm
 
-### 手順の全体像
-
-1. リレーサーバー（中継所）を起動する
-2. クライアント（投稿・購読ツール）を実行する
-
-### 1. リレーサーバーを起動（FodprRelay）
-
-リレーサーバーは別リポジトリ [FodprRelay](https://github.com/LunaYoineko/FodprRelay)
-にあります。`git clone` して実行してください。
+### 1. プロトコルライブラリ (このリポジトリ) を使う
 
 ```bash
-git clone https://github.com/LunaYoineko/FodprRelay
-cd FodprRelay
-nimble build -y
-./src/server
+git clone https://github.com/LunaYoineko/Fodpr
+cd Fodpr
+nimble install -y
 ```
 
-起動すると、次のように表示されます。
-
-```
-================================================
- Fodpr Relay Server running on ws://0.0.0.0:8000/
- (Ctrl+C で安全に終了できます)
-================================================
-```
-
-終了するときは **Ctrl+C** を押します。リスニングソケットを閉じて正常終了します。
-
-Docker で起動する場合:
-
-```bash
-cd FodprRelay
-docker compose up -d --build
-```
-
-ビルド後、`http://localhost:8000/` へアクセスすると動作確認用のテキストが返ります。
-ログは `docker compose logs -f` で確認できます。
-
-### 2. クライアントを実行
-
-別のターミナルで:
-
-```bash
-nim c -r examples/fodpr_client.nim
-```
-
-クライアントは以下の流れで動作します。
-
-1. `ws://localhost:8000/` へ接続
-2. 鍵ペアを生成し、JSON・文字列・バイナリの 3 タイプを EVENT として投稿
-   （各 `OK: Event accepted`）
-3. REQ（購読要求, TransType: All）で全タイプを購読
-4. サーバーが保存済みイベントを PUSH 形式で返却
-5. 送信タイプごとに適した配信方法で表示
-   （JSON はパースして整形 / 文字列はそのまま / バイナリはサイズのみ）
-6. 配信終了通知（`EOE: ...`）を受信して接続を閉じる
-
-### 3. サンプルを実行（サーバー不要）
-
-サーバーを立てずに、プロトコルのエンコード / デコードだけを試したい場合は:
+#### サンプル実行 (サーバー不要・プロトコル動作確認)
 
 ```bash
 nim c -r examples/protocol_demo.nim
 ```
 
-鍵ペア生成、イベントの作成・署名、エンコード → デコード、署名検証、REQ の
-エンコード / デコードまでをオフラインで確認できます。
+鍵ペア生成、イベントの作成・署名、エンコード → デコード、署名検証までをオフラインで確認できます。
+
+### 2. Web クライアント (FodprWebClient) でメッシュに参加
+
+```bash
+cd ../FodprWebClient
+pnpm install
+pnpm dev --port 5199
+```
+
+ブラウザで `http://localhost:5199` を開き、設定画面 (歯車アイコン) → 「ネットワーク」タブで：
+- 招待コード (`f2finv1...`) を入力して接続、または
+- `fpub1...@[ipv6]:port` 形式のブートストラップノードを追加、または
+- 何もしなければ **ビルトインコミュニティアンカー** へ自動接続を試行
+
+### 3. 本番運用 (静的ファイル配信)
+
+```bash
+# ビルド
+pnpm build
+# 静的ファイルを配信ディレクトリへ同期
+cp -r dist/assets /var/www/fodpr/assets
+cp dist/index.html /var/www/fodpr/index.html
+cp public/docs.html /var/www/fodpr/docs.html
+
+# 静的ファイルサーバー起動 (Node.js)
+FODPR_STATIC_ROOT=/var/www/fodpr FODPR_API_PORT=8088 nohup node api/server.mjs > /tmp/fodpr-api.log 2>&1 &
+```
 
 ---
 
-## 開発者向け詳細（技術仕様）
-
-### ディレクトリ構成
+## ディレクトリ構成
 
 ```
 Fodpr/
-├── Fodpr.nimble        # Nimble パッケージ定義（Library 型）
+├── Fodpr.nimble        # Nimble パッケージ定義 (Library 型)
 ├── src/
-│   ├── Fodpr.nim       # ライブラリのメインモジュール（protocol / crypto / envelope を再エクスポート）
-│   ├── protocol.nim    # ワイヤプロトコルのエンコード / デコード（EVENT / REQ / DEL / AUTH）
-│   ├── crypto.nim      # Bech32 と secp256k1（鍵生成・署名・検証・ECDH）
-│   └── envelope.nim    # 宛先別暗号化エンベロープ（TransTypeEncrypted）
+│   ├── Fodpr.nim       # ライブラリのメインモジュール (protocol / crypto / envelope / f2f/* を再エクスポート)
+│   ├── protocol.nim    # ワイヤプロトコル: メッセージ種別 / TransType / DhtOp / データ構造 (PeerInfo, PeerList, WoTIntro, InvitationCode, DhtMessage, FodprData)
+│   ├── crypto.nim      # secp256k1 (鍵生成・署名・検証・ECDH・Bech32)
+│   ├── envelope.nim    # 宛先別暗号化エンベロープ (TransTypeEncrypted)
+│   └── f2f/            # F2F メッシュ実装
+│       ├── dht.nim           # Kademlia ルーティングテーブル (256bit ID, k-buckets, PING/FIND_NODE/FIND_VALUE/STORE)
+│       ├── wot.nim           # WoT グラフ (addWoTIntroduction / findTrustPath / recommendPeersByTrust / decayTrustScores)
+│       ├── discovery.nim     # WoT グラフ構築, getNextCandidates, requestPeerList/sendPeerList, WoT 紹介処理
+│       ├── peer_cache.nim    # ピアキャッシュ永続化 (50 件 LRU+スコア順), selectPeers
+│       ├── invitation.nim    # Bech32 招待コード encode/decode/verify (f2finv1...)
+│       ├── signaling.nim     # F2F SDP offer/answer/candidate サポート
+│       ├── transport.nim     # WebRTC データチャネル send/receive, IPv6 プレフィックス + IID 生成
+│       └── bootstrap.nim     # 設定シードノードからのブートストラップ
 ├── examples/
-│   ├── fodpr_client.nim    # リレーサーバーと通信するクライアントのサンプル
-│   └── protocol_demo.nim   # protocol.nim を使ったサンプル（サーバー不要）
+│   └── protocol_demo.nim   # protocol.nim を使ったサンプル (サーバー不要)
 ├── LICENSES/           # サードパーティライブラリのライセンス情報
-├── README.md           # 日本語版 README
+├── README.md           # 日本語版 README (このファイル)
 ├── README.en.md        # 英語版 README
-└── data/               # LMDB データベース（リレーサーバー側で使用・gitignore）
+└── data/               # ローカル実行時のピアキャッシュ等 (gitignore)
 ```
 
-リレーサーバー（FodprRelay）は別リポジトリで管理しています。
+> **注意**: 旧 `FodprRelay/` リポジトリ、`src/server.nim`、`f2f/group.nim` (RtcGroup) は v0.6 で **削除済み** です。リレーサーバーは存在しません。
 
-```
-FodprRelay/
-├── FodprRelay.nimble   # Nimble パッケージ定義（requires "https://github.com/LunaYoineko/Fodpr"）
-├── Dockerfile          # リレーサーバー用の Docker イメージ定義
-├── docker-compose.yml  # Docker Compose での起動設定（ポート 8000 / データボリューム）
-└── src/
-    └── server.nim      # リレーサーバー
-```
+---
 
-### メッセージ種別（先頭 1 バイト）
+## メッセージ種別（先頭 1 バイト）
 
-| 値   | 種別  | 方向                     | 説明                       |
-|------|-------|--------------------------|----------------------------|
-| 0x01 | EVENT | クライアント → サーバー | 署名付きイベントの投稿     |
-| 0x02 | REQ   | クライアント → サーバー | サブスクリプション要求     |
-| 0x03 | DEL   | クライアント → サーバー | イベント削除要求（署名付き）|
-| 0x04 | AUTH  | クライアント → サーバー | 読取認証の署名応答（NIP-42 相当）|
-| 0x05 | SIGNAL | クライアント → サーバー | WebRTC シグナリングメッセージ |
-| 0x81 | PUSH  | サーバー → クライアント | イベント配信               |
-| 0x82 | CHALLENGE | サーバー → クライアント | 認証チャレンジ（nonce 32 バイト）|
-| 0x83 | SIGNAL_PUSH | サーバー → クライアント | WebRTC シグナリングの中継 |
+| 値   | 定数                    | 方向             | 説明                                    |
+|------|-------------------------|------------------|-----------------------------------------|
+| 0x01 | `MsgTypeEvent`          | ピア → ピア      | 署名付きイベント (ゴシップ配信)           |
+| 0x05 | `MsgTypeSignal`         | ピア → ピア      | WebRTC シグナリング (offer/answer/ICE)   |
+| 0x06 | `MsgTypeData`           | ピア → ピア      | 直接 P2P メッセージ (FodprData)           |
+| 0x07 | `MsgTypePeerListReq`    | ピア → ピア      | ピアリスト要求                            |
+| 0x87 | `MsgTypePeerListPush`   | ピア → ピア      | ピアリスト配信 (WoTキャッシュ同期)         |
+| 0x08 | `MsgTypeWoTIntro`       | ピア → ピア      | WoT 紹介要求                              |
+| 0x88 | `MsgTypeWoTIntroPush`   | ピア → ピア      | WoT 紹介配信                              |
+| 0x09 | `MsgTypeInvitationReq`  | ピア → ピア      | 招待コード要求                            |
+| 0x89 | `MsgTypeInvitationPush` | ピア → ピア      | 招待コード配信                            |
+| 0x0B | `MsgTypeDht`            | ピア → ピア      | DHT RPC (PING/FIND_NODE/FIND_VALUE/STORE) |
+| 0x8B | `MsgTypeDhtNodes`       | ピア → ピア      | DHT 近傍ノード応答                         |
+| 0x8C | `MsgTypeDhtValue`       | ピア → ピア      | DHT 値応答 (FIND_VALUE ヒット / STORE 完了) |
 
-数値はすべて **ビッグエンディアン** でエンコードされます。
+---
 
-### 送信タイプ（TransType）と配信方法
+## 送信タイプ（TransType）
 
-`transType` は「どのように送るか」を表す**送信方法**であり、投稿する人が
-自由に選べます。サーバーは投稿の中身の意味（プロフィール / 投稿 / メディア など）を
-一切解釈せず、送信タイプに基づいて保存・配信するだけです。意味の解釈は
-すべてクライアント側の役割です（例: JSON なら特定のキー / 値をプロフィールと判定する）。
+| 定数 | 値 | 説明 |
+|------|----|------|
+| `TransTypeJSON` | 1 | JSON 構造化データ (UTF-8) |
+| `TransTypeString` | 2 | 文字列 (UTF-8) |
+| `TransTypeBinary` | 3 | バイナリデータ (任意バイト列) |
+| `TransTypeSigned` | 4 | 全体署名イベント (全フィールド署名、SHA-256 = eventId) |
+| `TransTypeEncrypted` | 5 | 暗号化イベント (エンベロープ、E2EE、gift-wrap 相当) |
+| `TransTypeData` | 7 | WebRTC データチャネル専用 (直接 P2P メッセージ) |
+| `TransTypePeerList` | 9 | F2F: ピアリスト交換 (WoTキャッシュ同期) 専用 |
+| `TransTypeWoTIntro` | 10 | F2F: WoT 紹介メッセージ専用 |
+| `TransTypeInvitation` | 11 | F2F: 招待コード専用 |
 
-| 定数              | 値 | 説明                                        | 配信方法                                        |
-|-------------------|----|---------------------------------------------|-------------------------------------------------|
-| `TransTypeJSON`   | 1  | JSON 構造化データ（content は UTF-8 の JSON） | サーバーが受信時に JSON 構文を検証。クライアントは受信後に JSON としてパースし整形表示 |
-| `TransTypeString` | 2  | 文字列（content は UTF-8）                   | そのまま文字列として配信・表示                   |
-| `TransTypeBinary` | 3  | バイナリデータ（content は任意のバイト列）    | バイナリのまま配信。クライアントはサイズのみ表示 |
-| `TransTypeSigned` | 4  | 全体署名イベント（content は任意）           | 本文だけでなく全フィールドを署名。その SHA-256 がイベント ID になる |
-| `TransTypeEncrypted` | 5  | 暗号化イベント（content はエンベロープ）    | content は envelope.nim の宛先別暗号化エンベロープ。全体署名 + to: タグ一致を検証 |
-| `TransTypeWebRTC`  | 6  | WebRTC シグナリング専用                    | SIGNAL (0x05) / SIGNAL_PUSH (0x83) で中継。保存せず即座に配信 |
-| `TransTypeAll`    | 0  | すべてのタイプ（REQ でのみ使用）             | サーバーが全タイプの保存イベントを配信           |
+---
 
-### EVENT のバイナリ形式
+## DHT 操作種別 (Kademlia)
 
-```
-transType(2) | createdAt(8) | pubkey(33) | tagCount(2)
-| (tagLen(2) | tag) × tagCount | contentLen(4) | content | signature(64)
-```
+| 定数 | 値 | 説明 |
+|------|----|------|
+| `DhtOpPing` | 0 | 生存確認 |
+| `DhtOpPong` | 1 | 生存応答 |
+| `DhtOpFindNode` | 2 | キー (nodeId) に最も近いノードを探す |
+| `DhtOpFindValue` | 3 | キーに対応する値を探す (IP アドレス解決) |
+| `DhtOpStore` | 4 | 値を保存する (自ノードの IP 記録等) |
 
-- `transType` — 送信タイプ（uint16: 0=All(REQ のみ), 1=JSON, 2=String, 3=Binary, 4=Signed, 5=Encrypted, 6=WebRTC）
-- `createdAt` — Unix タイムスタンプ（秒, uint64）
-- `pubkey` — 送信者の公開鍵（圧縮形式 33 バイト）
-- `tags` — タグ文字列のリスト
-- `content` — 本文（タイプに応じて JSON / 文字列 / バイナリ / エンベロープ）
-- `signature` — 署名（64 バイト）。
-  - TransType 1〜3（JSON / String / Binary）: content の SHA-256 ダイジェストに対する ECDSA 署名
-  - TransType 4・5（Signed / Encrypted）: `createdAt`・`pubkey`・`tags` を含む
-    **全フィールド**（`encodeEventSignedData()` のバイト列）に対する署名
+---
 
-### 全体署名（TransTypeSigned）とイベント ID
+## データ構造 (主要)
 
-`TransTypeSigned` は、`signature` を除いた全フィールド
-（`transType | createdAt | pubkey | tags | content`）を署名対象とします。
-署名対象バイト列（`encodeEventSignedData(ev)`）の **SHA-256** が
-**イベント ID**（`eventId`）になります。
-
+### PeerInfo (ピア情報)
 ```nim
-let evId = eventIdHex(ev)      # 64 桁の 16 進文字列
-let ok   = verifyEvent(ev.pubkey, ev, ev.signature)  # 全体署名の検証
+PeerInfo = object
+  pubkey: SkPublicKey      # 公開鍵 (圧縮形式 33 バイト)
+  addresses: seq[string]   # 接続アドレス (IPv6 一時アドレス "[ipv6]:port" 等)
+  lastSeen: uint64         # 最後に見た時刻 (Unix秒)
+  trustScore: float        # 信頼スコア (0.0-1.0)
 ```
 
-イベント ID はタグ規約の `e:<eventId>` で参照できるため、
-**reply-to（スレッド参照）** を厳密に表現できます。
+### PeerList (キャッシュ交換, TransTypePeerList)
+`version(8) | peerCount(2) | PeerInfo[] | signature(64)` — 最大 50 件。
 
-### 宛先別暗号化（TransTypeEncrypted）とエンベロープ
+### WoTIntro (WoT 紹介, TransTypeWoTIntro)
+`introducer: SkPublicKey | newPeer: PeerInfo | signature: FodprSignature`
 
-`TransTypeEncrypted` の `content` は `envelope.nim` が作る
-**宛先別暗号化エンベロープ**（gift-wrap / seal 相当）です。
+### InvitationCode (招待コード, TransTypeInvitation)
+Bech32: `f2finv1...` — `version(1) | issuer(33) | targetPeer: PeerInfo | expiresAt(8) | scope(1) | signature(64)`
 
-エンベロープの形式（すべてビッグエンディアン）:
-
+### DhtMessage (DHT RPC, MsgTypeDht/DhtNodes/DhtValue)
 ```
-version(1) | recipientCount(2) |
-(recipientPubkey(33) | wrapNonce(12) | wrappedKey(32) | wrappedKeyTag(16)) × recipientCount |
-bodyNonce(12) | bodyTag(16) | bodyCiphertext
+op(1) | msgId(16) | key(32) | nodes[] | value(string) | sender(33) | signature(64)
 ```
+- `nodeId = SHA-256(compressed pubkey)` (256 ビット)。XOR 距離で近傍判定。
 
-鍵スキーム:
+### FodprData (直接 P2P メッセージ, MsgTypeData)
+`sender | target | seq | timestamp | tags[] | content | signature` — `TransTypeSigned/Encrypted` 等を content に包む。
 
-- メッセージ鍵 **K**（32 バイトの乱数）で本文（body）を **AES-256-GCM** 暗号化
-- K を各受信者向けに、ECDH 共有鍵から導出したラップ鍵 **W** でラップ
-  - `W = SHA-256(ECDH(送信者秘密鍵, 受信者公開鍵) || "FodprEnvelopeV1" || 受信者公開鍵)`
-- 受信者は `ECDH(自分の秘密鍵, 送信者の公開鍵)` で同じ W を復元し、K を取り出して本文を復号
+---
 
-```nim
-# 送信者: 複数受信者へ暗号化
-let envelope = encryptEnvelope(body, senderPriv, @[recip1.publicKey, recip2.publicKey])
-# 受信者: 自分の秘密鍵とイベントの pubkey (送信者) で復号
-let body = decryptEnvelope(ev.content, myPriv, ev.pubkey)
-```
+## 関連プロジェクト
 
-リレー用 API（内容は復号せず構造だけを見る）:
-
-```nim
-let ok     = isValidEnvelope(ev.content)         # 構造検証
-let recips = envelopeRecipients(ev.content)      # 受信者の公開鍵一覧 (to: タグと突合)
-```
-
-暗号化イベントには `to:<fpub>` タグが必須で、リレーはタグがエンベロープ内の
-受信者と一致することを検証します（「読めない人への配送」を防ぐ）。
-
-### 読取認証（AUTH, NIP-42 相当）
-
-`to:<fpub>` 宛先限定イベントは、宛先本人しか受け取れないようにするため、
-リレーが **チャレンジ → 署名応答** の認証を行います。
-
-```
-1. クライアント → REQ(subId, tagKey="to", tagVal=fpub)
-2. サーバー   → チャレンジ (0x82) nonce(32) を送る
-3. クライアント → AUTH (0x04) nonce(32) | pubkey(33) | signature(64)
-   (署名対象: nonce | pubkey)
-4. サーバー   → 認証OK 後、宛先本人として REQ を再開
-```
-
-```nim
-var auth = FodprAuth(nonce: nonce, pubkey: kp.publicKey, signature: placeholder)
-auth.signature = signContent(kp.privateKey, encodeAuthSignedData(auth))
-await ws.send(encodeAuth(auth), Binary)
-```
-
-認証に成功した購読だけが `to:` 宛先限定イベントを受け取れます
-（公開イベントは従来どおり認証なしで購読できます）。
-
-### タグ規約
-
-Fodpr のタグは `"<キー>:<値>"` 形式の文字列です。
-
-| タグ          | 説明                                        |
-|---------------|---------------------------------------------|
-| `to:<fpub>`   | 宛先の公開鍵（fpub 形式、小文字）。宛先限定イベントで必須 |
-| `p:<fpub>`    | 関係者（participant）の公開鍵（参照用）      |
-| `e:<eventId>` | 参照イベント（reply-to / スレッド結合に使用）|
-
-### REQ のバイナリ形式
-
-```
-MsgTypeReq(1) | subIdLen(2) | subId | transType(2) | tagKeyLen(2) | tagKey | tagValLen(2) | tagVal
-```
-
-- `transType` が `0`（`TransTypeAll`）の場合はすべてのタイプを購読
-- `transType` が `1`〜`5` の場合は、対応するタイプ（JSON / String / Binary / Signed / Encrypted）のイベントを購読
-- `transType` が `6`（`TransTypeWebRTC`）の場合は WebRTC シグナリング専用。`to:` タグ
-  (宛先 fpub) が必須。保存済みイベントはなく EOE のみ送信され、以後は SIGNAL メッセージの
-  リアルタイム中継のみを行う
-- `tagKey` / `tagVal` でタグによる絞り込みが可能（`tagKey = "pubkey"` で公開鍵、`tagKey = "to"` で宛先を指定）
-
-### PUSH のバイナリ形式
-
-```
-MsgTypePush(1) | subIdLen(2) | subId | EVENT 本体
-```
-
-### DEL のバイナリ形式（イベント削除 API）
-
-投稿者は自分のイベントを削除できます。要求全体に署名を付けることで、
-**送信者本人だけが自分の投稿を削除できる**仕組みです。
-
-```
-MsgTypeDel(1) | transType(2) | targetType(1) | pubkey(33)
-| [createdAt(8) | contentHash(32)] | signature(64)
-```
-
-**署名対象**（`signature` を除いた以下のバイト列）:
-
-```
-transType(2) | targetType(1) | pubkey(33) | [createdAt(8) | contentHash(32)]
-```
-
-- `transType` — 削除対象の送信タイプ（`0`=全タイプ, `1`=JSON, `2`=String, `3`=Binary, `4`=Signed, `5`=Encrypted）
-- `targetType` — 削除対象の指定方法
-  - `0`（`DelTargetPubkey`）: その公開鍵のイベントを `transType` 単位で全削除
-  - `1`（`DelTargetEvent`）: `createdAt` と `contentHash`（content の SHA-256）が一致する特定イベントを削除
-  - `2`（`DelTargetEventId`）: `eventId`（全体署名イベントのイベント ID）が一致する特定イベントを削除
-- `pubkey` — 削除対象イベントの公開鍵（自分の公開鍵のみ）
-- `signature` — 上記の署名対象を送信者の秘密鍵で署名した ECDSA 署名（64 バイト）
-
-サーバーは署名を検証し、イベントの公開鍵が要求の公開鍵と一致するものだけを
-削除します（他人のイベントは削除できません）。
-
-ライブラリが提供する API:
-
-```nim
-var req = FodprDelReq(
-  transType: TransTypeJSON,   # 削除対象の送信タイプ
-  targetType: DelTargetPubkey,# 公開鍵単位で削除 / DelTargetEvent で特定イベント
-  pubkey: kp.publicKey,       # 自分の公開鍵
-  createdAt: ev.createdAt,    # DelTargetEvent のときのみ有効
-  contentHash: hash,          # DelTargetEvent のときのみ有効 (content の SHA-256)
-  signature: sig)             # 下記で署名した値
-let packet = encodeDel(req)   # 完全な DEL パケット（先頭 0x03 + 署名つき）
-```
-
-署名は `encodeDelSignedData(req)` の返すバイト列に対して行います:
-
-```nim
-let signed = encodeDelSignedData(req)
-req.signature = signContent(kp.privateKey, signed)
-```
-
-サーバー側では `decodeDelReq(stream)` でパケットを復元し、`verifyContent` で
-署名を検証します。
-
-### WebRTC シグナリング（TransTypeWebRTC）
-
-`TransTypeWebRTC`（6）は WebRTC の P2P 確立のためのシグナリング専用です。
-リレーはシグナリングメッセージを保存せず、署名検証後に即座に宛先へ中継します。
-
-#### シグナリングメッセージ (SIGNAL / SIGNAL_PUSH)
-
-**SIGNAL パケット (0x05, クライアント → サーバー):**
-
-```
-MsgTypeSignal(1) | signalType(1) | senderPubkey(33) | targetPubkey(33) | contentLen(4) | content | signature(64)
-```
-
-**SIGNAL_PUSH パケット (0x83, サーバー → クライアント):**
-
-```
-MsgTypeSignalPush(1) | subIdLen(2) | subId | signalType(1) | senderPubkey(33) | targetPubkey(33) | contentLen(4) | content | signature(64)
-```
-
-**署名対象バイト列:**
-
-```
-signalType(1) | senderPubkey(33) | targetPubkey(33) | contentLen(4) | content
-```
-
-| フィールド | 説明 |
-|----------|------|
-| `signalType` | `1`=Offer, `2`=Answer, `3`=Candidate, `4`=HostChange |
-| `senderPubkey` | 送信者の公開鍵 (圧縮 33 バイト) |
-| `targetPubkey` | 宛先の公開鍵 (圧縮 33 バイト) |
-| `content` | SDP offer/answer JSON や ICE candidate JSON (IPv6 一時アドレスを含む) |
-| `signature` | 上記フィールド全体の secp256k1 ECDSA 署名 (64 バイト) |
-
-ライブラリ API:
-
-```nim
-# シグナリングメッセージ作成・署名
-var sig = FodprSignal(
-  signalType: SignalOffer,
-  sender: kp.publicKey,
-  target: targetPub,
-  content: """{"sdp":"..."," candidates":[...]," ipv6TempAddr":"2001:db8::1"}""")
-sig.signature = signSignal(kp.privateKey, sig)
-let packet = $MsgTypeSignal & encodeSignal(sig)
-
-# 受信・検証
-let received = decodeSignal(strm)
-if verifySignal(received):
-  # 署名 OK — 信頼できる送信者
-  echo signalTypeName(received.signalType), ": ", received.content
-```
-
-#### ホスト-ゲスト星形トポロジと自動ホスト昇格
-
-複数のゲストが 1 人のホストに対して WebRTC 接続を張る星形トポロジをサポートします。
-
-- **グループ ID** = ホストの fpub (小文字)
-- クライアントは `REQ(TransTypeWebRTC, tagKey="to", tagVal=<ホスト fpub>)` で
-  ホストのグループに参加 (AUTH 必須)
-- ホストが切断された場合、**最古の guest** (join 時刻が最も古いメンバー) が
-  自動でホストに昇格
-- リレーは全メンバーにテキスト通知 `HOST_CHANGE: <new_host_fpub>` を送信
-- メンバーは新ホストの fpub で REQ を再送信し直す
-
-```
-ホスト (B)  ── シグナリング ──>  リレー  <── ゲスト (A) へ中継
-ホスト (B)  ── シグナリング ──>  リレー  <── ゲスト (C) へ中継
-
-B が切断 → A (最古の guest) が新ホストに昇格 → HOST_CHANGE 通知 → 全員再接続
-```
-
-- P2P 通信は **IPv6 一時アドレス** 同士で行われます (SDP/ICE candidate の
-  content に JSON として含まれる)
-- リレーは content を解釈・復号せず、署名検証 + 宛先照合のみを行う
-- 双方はシグナリングメッセージの secp256k1 署名を検証し、P2P データチャネル
-  での直接通信後はリレーを通らない
-
-#### F2F (Friend-to-Friend) / WoT (Web of Trust) P2P
-
-- **ピアキャッシュ**: 最大 50 件の `F2FPeerInfo` (pubkey, addresses, lastSeen, trustScore)
-  を `localStorage.fodpr_f2f_peer_cache` に永続化
-- **ブートストラップ**: 招待コード (`f2finv1...` Bech32) またはリレーのシード取得 (`bootstrap()`)
-- **PeerList 交換**: P2P 接続確立直後に `TransTypePeerList` (0x09) / `MsgTypePeerListPush` (0x87)
-  で署名付きピアリスト (最大 50 件) を相互送信。受信側はキャッシュマージ後、
-  未接続ピアへ自動ダイヤルして最大 50 接続まで連鎖的に P2P を確立
-- **WoT 紹介**: `MsgTypeWoTIntroPush` (0x88) で信頼できるピアから新ピアを紹介
-  (trustScore 継承)
-- **グループ**: ホスト-ゲスト星形 (`TransTypeGroup` でリレーに永続化)。ホスト切断時
-  自動昇格 (`group_host_changed`)
-
-### ストレージ（FodprRelay の server.nim）
-
-リレーサーバー（FodprRelay）は、イベントを送信タイプごとに分けて LMDB に
-永続化します（`./data/` ディレクトリ、起動時に自動作成）。
-
-| DBI         | 保存するイベント | キー                    |
-|-------------|------------------|-------------------------|
-| `json`      | TransTypeJSON    | 現在時刻 + 乱数         |
-| `string`    | TransTypeString  | 現在時刻 + 乱数         |
-| `binary`    | TransTypeBinary  | 現在時刻 + 乱数         |
-| `signed`    | TransTypeSigned  | 現在時刻 + 乱数         |
-| `encrypted` | TransTypeEncrypted | 現在時刻 + 乱数        |
-
-- サーバーは content を解釈しないため、どのタイプも一意なキーで追記保存されます
-- サーバー終了時（Ctrl+C）に環境をクローズし、データは再起動後も保持されます
-
-### 暗号仕様（crypto.nim）
-
-- 鍵ペア: secp256k1 楕円曲線（`nim-secp256k1`）
-- ハッシュ: SHA-256（`nimSHA2`）
-- 乱数生成: OS 由来の暗号学的に安全な乱数（`nimcrypto/sysrand`）
-- Bech32: BIP-173 準拠。HRP は秘密鍵が `fsec`、公開鍵が `fpub`
-
-```nim
-let kp = generateFodprKey()                    # 鍵ペア生成
-let sig = signContent(kp.privateKey, content)  # 署名
-let ok   = verifyContent(kp.publicKey, content, sig)  # 検証
-let priv = fsecEncode(kp.privateKey)           # fsec1... 形式へ変換
-```
+- **FodprWebClient** (TypeScript/React) — ブラウザ向けメッシュクライアント (`../FodprWebClient`)
+- **FodprTSSDK** (TypeScript) — 共通プロトコル/暗号 SDK (`../FodprTSSDK`)
+- **reference.md** (`../FodprWebClient/reference.md`) — イベント送信リファレンス (v0.6 ゴシップ版)
 
 ---
 
 ## ライセンス
 
-Fodpr 自体は MIT ライセンスです。
+MIT License (see LICENSES/)
 
-使用しているサードパーティライブラリのライセンス情報は
-[LICENSES/](LICENSES/README.md) にまとめています。
+---
+
+## 更新履歴 (v0.6 主な変更)
+
+- **2026-08-12**: v0.6 "Mesh" リリース — リレー廃止、完全 P2P メッシュ化。Kademlia DHT over WebRTC、WoT 信頼ゲート、ゴシップ、招待コード/ビルトインアンカーブートストラップ、GeoIP 接続多様性、IPv6 インバウンド遮断対策ドキュメント化。

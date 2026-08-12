@@ -19,7 +19,9 @@ F2F は、Fodpr プロトコルにおける **友人ベースの P2P メッシ�
   (`f2f/discovery.nim`) — ホップ制限 (MAX_HOPS=2)、
   eventId で重複排除。直接 P2P メッセージは `FodprData` で運ぶ。
 - **ブートストラップ (リレーなし)**: 招待コード (`f2finv1...`)、設定シードノード
-  (`fpub1...@[ipv6]:port`)、手動 IP 入力。
+  (`fpub1...@[ipv6]:port`)、手動 IP 入力、**ビルトインコミュニティアンカー** (`FODPR_BOOTSTRAP_ANCHORS`)。
+- **GeoIP 接続多様性**: ダイヤル候補選抜時に **国ごとに最大 2 本を優先確保**し、地域分断リスクを低減。
+- **IPv6 インバウンド遮断対策**: 住宅用 CPE/ファイアウォールのデフォルト遮断を前提に、到達可能アンカー経由・シグナリングフォールバック・ICE/STUN を多層で防御。
 
 v0.6 で削除されたもの: リレークライアント、ホスト昇格型グループ (`f2f/group.nim`)、
 3モード切替 (`f2f`/`rtcgroup`/`relay`)、リレー経由イベント REST、メディアアップロード API。
@@ -107,6 +109,7 @@ interface F2FPeerInfo {
   addresses: string[];   // 接続アドレス (IPv6 一時アドレス [ipv6]:port 等)
   lastSeen: number;      // 最後に見た時刻 (Unix秒)
   trustScore: number;    // WoT 信頼スコア (0.0 ~ 1.0, 新規は最小値)
+  country?: string;      // GeoIP 国コード (ISO 3166-1 alpha-2), /64 プレフィクスから推定
 }
 ```
 
@@ -171,6 +174,7 @@ interface DhtNodeInfo {
 | `f2f/signaling.nim` | F2F SDP offer/answer/candidate サポート |
 | `f2f/transport.nim` | WebRTC データチャネル send/receive, IPv6 プレフィックス + インターフェース ID 生成 |
 | `f2f/bootstrap.nim` | 設定シードノード (`fpub1...@[ipv6]:port`) からのブートストラップ |
+| `f2fMesh.ts` (TS) | メッシュマネージャ: WebRTC ピア接続 / ダイヤル / ゴシップ / **GeoIP 多様性選抜** / ビルトインアンカー (`FODPR_BOOTSTRAP_ANCHORS`) |
 
 ---
 
@@ -179,32 +183,64 @@ interface DhtNodeInfo {
 1. **初回ブートストラップ (リレーなし)**
    - 完全新規ユーザーは招待コード (`f2finv1...`, `f2f/invitation.nim`) か、設定シードノード
      (`f2f/bootstrap.nim`) から開始。
-   - 明示アドレス (招待/シード/手動 IP) は **WoT ゲートをバイパスし直接ダイヤル可能**
+   - 設定・キャッシュが**共に空の完全孤立**時は **ビルトインコミュニティアンカー**
+     (`FODPR_BOOTSTRAP_ANCHORS` / `f2fMesh.ts` に定義) へ**自動フォールバック**とダイヤル
+     (Bitcoin DNS seed / IPFS bootnodes 方式)。アンカーは信頼済み (trustScore 1.0) 扱い。
+   - 明示アドレス (招待/シード/手動 IP/ビルトインアンカー) は **WoT ゲートをバイパスし直接ダイヤル可能**
      (信頼済みピア)。アンカーを 1 本繋ぐと DHT が残りのグラフを解決する。
-   - 到達できない場合のみ手動 IPv6 入力でフォールバック。
+   - 到達不能時は手動 IPv6 入力でフォールバック。
    - DHT `FIND_VALUE` で公開鍵 → IPv6 を解決し直接ダイヤル。
      ダイヤル失敗時は既接続メッシュピア経由シグナリングへフォールバック。
 
 2. **NAT トラバーサル / アドレス**
    - IPv6 一時アドレス (`f2f/transport.nim:getCurrentIpv6Prefix()` + インターフェース ID)
      を `addresses` に含める。STUN/TURN は基本使わず、直接 IPv6 ダイヤルを優先。
+   - ICE 候補に IPv6 一時アドレス + ポートを含め、STUN (Google `stun.l.google.com:19302` 等) で NAT タイプ検出・ホールパンチングを試行。
 
-3. **オフライン耐性**
+3. **IPv6 インバウンド遮断の現状と多層防御 ⚠️**
+   - **一般家庭用 CPE/ルーターはデフォルトで IPv6 インバウンドを遮断** しています (Verizon, AT&T, Unifi 等のデフォルトファイアウォール設定)。
+   - モバイル回線 (4G/5G) は CGNAT 的構成でほぼインバウンド不可。
+   - データセンター / VPS / クラウドのみ適切な設定で到達可能。
+   - **影響**: 完全遮断環境同士では直接 F2F 接続不能。メッシュ参加には **少なくとも 1 つの到達可能ピア (アンカー/知人/VPS)** が必要。
+   - **多層防御**:
+     1. **到達可能アンカーノード** (VPS/データセンター/開放済み自宅) を `FODPR_BOOTSTRAP_ANCHORS` またはユーザー設定 `fodpr_bootstrap_nodes` に登録し、そこを入り口にする。
+     2. **シグナリングフォールバック**: 直接ダイヤル失敗時、既接続メッシュピアを経由して SDP/ICE を中継し、ホールパンチングを試行。
+     3. **ICE/STUN**: Google STUN 等で NAT タイプ検出・ホールパンチング成功率を向上。
+     4. **ICE リスタート**: 接続断検知時、新しい ICE 候補で再ネゴシエーション。
+     4. **ユーザー側設定ガイド**: ルーターの IPv6 ファイアウォールで「ピンホール/ポート開放」 (UDP 全ポート、または WebRTC 使用ポート範囲) を推奨。Unifi 等では `WAN_IN` に `External→Internal` 許可ルール追加。
+   - **参考**: "Where Have All the Firewalls Gone? Security Consequences of Residential IPv6 Transition" (arXiv:2509.04792, 2025) — 数百万の住宅 IPv6 ホストがステートフルファイアウォールなしで公開されている実態。NAT が事実上のファイアウォールだったことが判明。
+
+4. **GeoIP ベース接続多様性 (メッシュ分断リスク低減)**
+   - **問題**: 「日本 30 本 / 欧州 0 本」の極端な偏りでは、地域間ブリッジピアが単一障害点になり、オフラインで永久分断されるリスク。
+   - **対策**: PeerList 受信時の自動ダイアル (`selectDiversePeers`) で **国ごとに最大 2 本を優先確保** (DIVERSITY_PER_COUNTRY=2)。
+   - **仕組み**: 
+     - `/64` プレフィクスから GeoIP (geoip-lite) で国コードを推定 (1 週間キャッシュ)。
+     - 候補を国ごとにバケツ分け → 各国から信頼順で最大 2 件優先採用。
+     - 残りはグローバル信頼順で埋める。GeoIP 失敗は 'XX' バケツで信頼順フォールバック。
+   - **効果**: 地域コミュニティ間のブリッジが冗長化され、特定ピアのオフラインでも自動再結合可能。
+
+5. **NAT トラバーサル / アドレス**
+   - IPv6 一時アドレス (`f2f/transport.nim:getCurrentIpv6Prefix()` + インターフェース ID)
+     を `addresses` に含める。STUN/TURN は基本使わず、直接 IPv6 ダイヤルを優先。
+   - ICE 候補に IPv6 一時アドレス + ポートを含め、STUN (Google `stun.l.google.com:19302` 等) で NAT タイプ検出・ホールパンチングを試行.
+
+6. **オフライン耐性**
    - ピアキャッシュ / WoT グラフは `peer_cache.nim` (ファイル) に永続化。
-   - 次回起動時にキャッシュから即座に自動ダイヤル開始。
+   - 次回起動時にキャッシュから即座に自動ダイヤル開始.
 
-4. **プライバシー**
-   - PeerList / WoTIntro / DhtMessage の交換は **暗号化データチャネル** で行う。
+7. **プライバシー**
+   - PeerList / WoTIntro / DhtMessage の交換は **暗号化データチャネル** で行う.
    - ゴシップイベントは署名検証により正当性を担保。直接メッセージは `FodprData` 内で
-     `TransTypeEncrypted` により暗号化可能。
+     `TransTypeEncrypted` により暗号化可能.
 
-5. **スパム / 悪意あるピア対策**
-   - WoT スコアが低いピアはダイヤル対象外 (connect threshold ゲート)。
-   - 署名検証で正当なピア以外の PeerList / DhtMessage を拒否。
-   - スコア低下で接続を切断・優先度を下げる。
+8. **スパム / 悪意あるピア対策**
+   - WoT スコアが低いピアはダイヤル対象外 (connect threshold ゲート).
+   - 署名検証で正当なピア以外の PeerList / DhtMessage を拒否.
+   - スコア低下で接続を切断・優先度を下げる.
 
 ---
 
 ## 関連ドキュメント
 
 - [Fodpr プロトコル仕様 (README.md)](../README.md)
+- [イベント/ワイヤフォーマットリファレンス (v0.6 ゴシップ版)](../FodprWebClient/reference.md)
