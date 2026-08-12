@@ -38,6 +38,18 @@ WoT 紹介 (`MsgTypeWoTIntro(0x08/0x88)`) で紹介者の identityTrust をベ�
 ## 4. 最大 50 件のキャッシュ上限 (LRU + スコア順)
 `peer_cache.nim` (ファイル) に永続化。`selectPeers` はスコア順で選択、古い物から LRU 削除。再起動時にキャッシュから即座に自動ダイヤル開始。
 
+## 5. モバイル回線 (au/Rakuten 等) 上の P2P 接続可能性 ⚓
+
+- **確認**: GodotEngineのWebRTC `DataChannel`を使用したオブジェクト同期テスト済み
+- **au 回線**: IPv6一時アドレスでのダイヤル成功。CGNAT下でもピンホール確率が比較的高く、P2P接続が成立する。
+- **Rakuten 回線**: IPv6一時アドレスでのダイヤル成功。au同様に比較的良好なP2P接続環境。
+- **モバイルP2Pの特徴**:
+  - モバイル回線はCGNAT的構成でインバウンドが困難だが、IPv6一時アドレスとWebRTC DataChannelを使用したアウトバウンド接続は比較的安定する。
+  - ダイヤル成功後は直接P2P通信が可能。リレーを介さなくてもデータ同期が続く。
+  - 接続確立にはSTUNでのNATタイプ検出が有効。Google STUN (`stun.l.google.com:19302`) での検出実績あり。
+  - **設計上の意義**: モバイルユーザーの参加を可能にし、メッシュの参加者プールを拡大。地域分断リスクの低減に寄与.
+
+
 ## 5. WoT 紹介 (WoT Introduction) with Distance Decay
 信頼できるピアから `MsgTypeWoTIntroPush` で新ピアを紹介 (`f2f/discovery.nim:processWoTIntroduction`)。
 
