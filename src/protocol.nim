@@ -35,7 +35,7 @@
 ##                          MsgTypeData (0x06) で運ばれ、signature で完全性を保証する。
 ##                          リレー・ホストは存在せず、すべてクライアント間で直接通信する。
 
-import streams, endians, strutils, times
+import streams, endians, strutils, times, random
 import crypto, secp256k1
 import nimSHA2
 
@@ -136,10 +136,12 @@ type
 
   # F2F: ピア情報 (ピアキャッシュ・WoT・DHT 用)
   PeerInfo* = object
-    pubkey*      : SkPublicKey  # 公開鍵 (圧縮形式 33 バイト)
-    addresses*   : seq[string]  # 接続アドレス (IPv6一時アドレス, WebSocket URL等)
-    lastSeen*    : uint64       # 最後に見た時刻 (Unix秒)
-    trustScore*  : float        # 信頼スコア (0.0-1.0)
+    pubkey*          : SkPublicKey  # 公開鍵 (圧縮形式 33 バイト)
+    addresses*       : seq[string]  # 接続アドレス (IPv6一時アドレス, WebSocket URL等)
+    lastSeen*        : uint64       # 最後に見た時刻 (Unix秒)
+    identityTrust*   : float        # 身元信頼 (0.0-1.0): この公開鍵が誰によって保証されているか
+    reliabilityScore*: float        # ネットワーク信頼性 (0.0-1.0): 接続成功率 / uptime / latency
+    country*         : string       # GeoIP 国コード (ISO 3166-1 alpha-2), /64 プレフィクスから推定
 
   # F2F: ピアリスト交換 (TransTypePeerList 用)
   # 最大50件のピア情報を署名付きで交換 (WoTキャッシュ同期)
@@ -151,30 +153,147 @@ type
 
   # F2F: WoT紹介メッセージ (TransTypeWoTIntro 用)
   # 新しいピアを信頼チェーン付きで紹介 (シビル耐性)
+  # distance decay: 紹介者の identityTrust * pathDecay^hopCount で信頼が減衰
   WoTIntro* = object
-    introducer*  : SkPublicKey  # 紹介者の公開鍵
-    newPeer*     : PeerInfo     # 紹介する新しいピアの情報
-    signature*   : FodprSignature # 紹介者の署名 (紹介者の秘密鍵で署名)
+    introducer*     : SkPublicKey  # 紹介者の公開鍵
+    newPeer*        : PeerInfo     # 紹介する新しいピアの情報
+    hopCount*       : uint8        # 紹介チェーンのホップ数 (0=直接紹介)
+    pathDecay*      : float        # 信頼減衰係数 (例: 0.6). 信頼 = introducer.identityTrust * pathDecay^hopCount
+    expiresAt*      : uint64       # 紹介の有効期限 (Unix秒)
+    signature*      : FodprSignature # 紹介者の署名 (紹介者の秘密鍵で署名)
 
   # F2F: インビテーションコード (TransTypeInvitation 用)
   # 第1救済手段。知人から共有される招待データ（QR/URI/テキスト）
   # Bech32エンコード形式: f2finv1...
+  # anti-reuse: invitationId + usedAt で同じコードの再利用を防ぐ
   InvitationCode* = object
-    version*     : uint8        # バージョン (0x01)
-    issuer*      : SkPublicKey  # 発行者の公開鍵 (圧縮形式 33 バイト)
-    targetPeer*  : PeerInfo     # 接続対象のピア情報
-    expiresAt*   : uint64       # 有効期限 (Unix秒)
-    scope*       : uint8        # 0=単発接続, 1=WoT招待(キャッシュ共有含む)
-    signature*   : FodprSignature # 発行者の署名 (秘密鍵で署名)
+    version*       : uint8        # バージョン (0x01)
+    issuer*        : SkPublicKey  # 発行者の公開鍵 (圧縮形式 33 バイト)
+    targetPeer*    : PeerInfo     # 接続対象のピア情報
+    expiresAt*     : uint64       # 有効期限 (Unix秒)
+    scope*         : uint8        # 0=単発接続, 1=WoT招待(キャッシュ共有含む)
+    invitationId*  : array[16, byte] # 一意な招待ID (anti-replay, anti-reuse)
+    usedAt*        : uint64        # 使用済み時刻 (0=未使用). anti-reuse 用
+    signature*     : FodprSignature # 発行者の署名 (秘密鍵で署名)
 
-  # DHT: 近傍ノード情報 (Kademlia ルーティングテーブル / 応答用)
-  # nodeId = SHA-256(圧縮公開鍵) をノードIDとして使う。
-  DhtNodeInfo* = object
-    nodeId*      : array[32, byte]  # SHA-256(compressed pubkey)
-    pubkey*      : SkPublicKey      # 公開鍵 (圧縮形式 33 バイト)
-    addresses*   : seq[string]      # 接続アドレス ["[ipv6]:port", ...]
-    lastSeen*    : uint64           # 最後に見た時刻 (Unix秒)
-    trustScore*  : float            # WoT信頼スコア (0.0-1.0, 新規は最小値)
+# DHT: 署名付きエンドポイントレコード (FIND_VALUE / STORE の value に格納)
+# DHT が信頼されなくても、エンドポイントが所有者によって署名されていることを検証可能にする。
+# 形式 (encodeEndpointRecordSignedData):
+#   pubkey(33) | seq(8) | timestamp(8) | expiresAt(8) | addrCount(1) | (addrLen(2) | addr)* | signature(64)
+type
+  EndpointRecord* = object
+    pubkey*      : SkPublicKey   # エンドポイントの所有者公開鍵
+    seq*         : uint64        # シーケンス番号 (リプレイ防止・更新順序)
+    timestamp*   : uint64        # 作成時刻 (Unix秒)
+    expiresAt*   : uint64        # 有効期限 (Unix秒)
+    addresses*   : seq[string]   # 接続アドレス ["[ipv6]:port", ...]
+    signature*   : FodprSignature # 所有者による署名
+
+# EndpointRecord の署名対象バイト列 (signature を除く全フィールド) をエンコード:
+#   pubkey(33) | seq(8) | timestamp(8) | expiresAt(8) | addrCount(1) | (addrLen(2) | addr)*
+proc encodeEndpointRecordSignedData*(er: EndpointRecord): string =
+  result = ""
+  # pubkey (33 バイト)
+  let pubRaw = er.pubkey.toRawCompressed()
+  for b in pubRaw: result.add(char(b))
+  # seq (uint64, ビッグエンディアン)
+  var seqNet: uint64
+  bigEndian64(addr seqNet, unsafeAddr er.seq)
+  var seqBytes: array[8, byte]
+  copyMem(addr seqBytes[0], addr seqNet, 8)
+  for b in seqBytes: result.add(char(b))
+  # timestamp (uint64, ビッグエンディアン)
+  var tsNet: uint64
+  bigEndian64(addr tsNet, unsafeAddr er.timestamp)
+  var tsBytes: array[8, byte]
+  copyMem(addr tsBytes[0], addr tsNet, 8)
+  for b in tsBytes: result.add(char(b))
+  # expiresAt (uint64, ビッグエンディアン)
+  var eaNet: uint64
+  bigEndian64(addr eaNet, unsafeAddr er.expiresAt)
+  var eaBytes: array[8, byte]
+  copyMem(addr eaBytes[0], addr eaNet, 8)
+  for b in eaBytes: result.add(char(b))
+  # addrCount (1 バイト)
+  result.add(char(byte(min(er.addresses.len, 255))))
+  # 各アドレス
+  for addr in er.addresses:
+    let aLen = uint16(addr.len)
+    var alNet: uint16
+    bigEndian16(addr alNet, unsafeAddr aLen)
+    var alBytes: array[2, byte]
+    copyMem(addr alBytes[0], addr alNet, 2)
+    result.add(char(alBytes[0]))
+    result.add(char(alBytes[1]))
+    result.add(addr)
+
+proc encodeEndpointRecord*(er: EndpointRecord): string =
+  result = encodeEndpointRecordSignedData(er)
+  let sigRaw = er.signature.sig.toRaw()
+  for b in sigRaw: result.add(char(b))
+
+proc signEndpointRecord*(priv: SkSecretKey, er: EndpointRecord): FodprSignature =
+  signBytes(priv, encodeEndpointRecordSignedData(er))
+
+proc verifyEndpointRecord*(er: EndpointRecord): bool =
+  verifyBytes(er.pubkey, encodeEndpointRecordSignedData(er), er.signature)
+
+proc decodeEndpointRecord*(stream: Stream): EndpointRecord =
+  # pubkey (33 バイト)
+  let pubBytes = readExactStr(stream, 33)
+  var pubArr: array[33, byte]
+  for i in 0..<33: pubArr[i] = byte(pubBytes[i])
+  let pubkey = parsePublicKey(pubArr)
+  # seq (uint64)
+  let seqBytes = readExactStr(stream, 8)
+  var seqNet, seqVal: uint64
+  copyMem(addr seqNet, unsafeAddr seqBytes[0], 8)
+  bigEndian64(addr seqVal, addr seqNet)
+  # timestamp (uint64)
+  let tsBytes = readExactStr(stream, 8)
+  var tsNet, tsVal: uint64
+  copyMem(addr tsNet, unsafeAddr tsBytes[0], 8)
+  bigEndian64(addr tsVal, addr tsNet)
+  # expiresAt (uint64)
+  let eaBytes = readExactStr(stream, 8)
+  var eaNet, eaVal: uint64
+  copyMem(addr eaNet, unsafeAddr eaBytes[0], 8)
+  bigEndian64(addr eaVal, addr eaNet)
+  # addrCount (1 バイト)
+  let addrCount = int(byte(readExactStr(stream, 1)[0]))
+  var addresses = newSeq[string]()
+  for i in 0..<addrCount:
+    let alBytes = readExactStr(stream, 2)
+    var alNet, aLen: uint16
+    copyMem(addr alNet, unsafeAddr alBytes[0], 2)
+    bigEndian16(addr aLen, addr alNet)
+    addresses.add(readExactStr(stream, int(aLen)))
+  # signature (64 バイト)
+  let sigBytes = readExactStr(stream, 64)
+  var sigArr: array[64, byte]
+  for i in 0..<64: sigArr[i] = byte(sigBytes[i])
+  let signature = FodprSignature(sig: parseSignature(sigArr))
+  return EndpointRecord(
+    pubkey: pubkey,
+    seq: seqVal,
+    timestamp: tsVal,
+    expiresAt: eaVal,
+    addresses: addresses,
+    signature: signature
+  )
+
+proc verifyEndpointRecord*(er: EndpointRecord): bool =
+  verifyBytes(er.pubkey, encodeEndpointRecordSignedData(er), er.signature)
+
+# DHT: 近傍ノード情報 (Kademlia ルーティングテーブル / 応答用)
+# nodeId = SHA-256(圧縮公開鍵) をノードIDとして使う。
+DhtNodeInfo* = object
+  nodeId*        : array[32, byte]  # SHA-256(compressed pubkey)
+  pubkey*        : SkPublicKey      # 公開鍵 (圧縮形式 33 バイト)
+  addresses*     : seq[string]      # 接続アドレス ["[ipv6]:port", ...]
+  lastSeen*      : uint64           # 最後に見た時刻 (Unix秒)
+  identityTrust* : float            # 身元信頼 (0.0-1.0)
+  reliabilityScore*: float          # ネットワーク信頼性 (0.0-1.0)
 
   # DHT: RPC メッセージ (Kademlia over WebRTC データチャネル)。
   # MsgTypeDht (0x0B) / MsgTypeDhtNodes (0x8B) / MsgTypeDhtValue (0x8C) の
@@ -642,8 +761,7 @@ proc decodeData*(stream: Stream): FodprData =
 # F2F: ピア情報 (PeerInfo) のエンコード/デコード
 # ---------------------------------------------------------------------------
 # PeerInfo 形式:
-#   pubkey(33) | addrCount(1) | (addrLen(2) | addr)* | lastSeen(8) | trustScore(4)
-
+#   pubkey(33) | addrCount(1) | (addrLen(2) | addr)* | lastSeen(8) | identityTrust(4) | reliabilityScore(4) | countryLen(2) | country
 proc encodePeerInfo*(p: PeerInfo): string =
   result = ""
 
@@ -672,13 +790,31 @@ proc encodePeerInfo*(p: PeerInfo): string =
   copyMem(addr lsBytes[0], addr lsNet, 8)
   for b in lsBytes: result.add(char(b))
 
-  # trustScore (float32, ビッグエンディアン)
-  var tsNet: uint32
-  var tsVal: uint32 = cast[uint32](p.trustScore)
-  bigEndian32(addr tsNet, addr tsVal)
-  var tsBytes: array[4, byte]
-  copyMem(addr tsBytes[0], addr tsNet, 4)
-  for b in tsBytes: result.add(char(b))
+  # identityTrust (float32, ビッグエンディアン)
+  var itNet: uint32
+  var itVal: uint32 = cast[uint32](p.identityTrust)
+  bigEndian32(addr itNet, addr itVal)
+  var itBytes: array[4, byte]
+  copyMem(addr itBytes[0], addr itNet, 4)
+  for b in itBytes: result.add(char(b))
+
+  # reliabilityScore (float32, ビッグエンディアン)
+  var rsNet: uint32
+  var rsVal: uint32 = cast[uint32](p.reliabilityScore)
+  bigEndian32(addr rsNet, addr rsVal)
+  var rsBytes: array[4, byte]
+  copyMem(addr rsBytes[0], addr rsNet, 4)
+  for b in rsBytes: result.add(char(b))
+
+  # country (可変長文字列: len(2) | country)
+  let cLen = uint16(p.country.len)
+  var clNet: uint16
+  bigEndian16(addr clNet, unsafeAddr cLen)
+  var clBytes: array[2, byte]
+  copyMem(addr clBytes[0], addr clNet, 2)
+  result.add(char(clBytes[0]))
+  result.add(char(clBytes[1]))
+  result.add(p.country)
 
 proc decodePeerInfo*(stream: Stream): PeerInfo =
   # pubkey (圧縮形式 33 バイト)
@@ -705,18 +841,34 @@ proc decodePeerInfo*(stream: Stream): PeerInfo =
   copyMem(addr lsNet, unsafeAddr lsBytes[0], 8)
   bigEndian64(addr lsVal, addr lsNet)
 
-  # trustScore (float32, ビッグエンディアン)
-  let tsBytes = stream.readStr(4)
-  var tsNet: uint32
-  copyMem(addr tsNet, unsafeAddr tsBytes[0], 4)
-  bigEndian32(addr tsNet, addr tsNet)
-  let trustScore = cast[float32](tsNet)
+  # identityTrust (float32, ビッグエンディアン)
+  let itBytes = stream.readStr(4)
+  var itNet: uint32
+  copyMem(addr itNet, unsafeAddr itBytes[0], 4)
+  bigEndian32(addr itNet, addr itNet)
+  let identityTrust = cast[float32](itNet)
+
+  # reliabilityScore (float32, ビッグエンディアン)
+  let rsBytes = stream.readStr(4)
+  var rsNet: uint32
+  copyMem(addr rsNet, unsafeAddr rsBytes[0], 4)
+  bigEndian32(addr rsNet, addr rsNet)
+  let reliabilityScore = cast[float32](rsNet)
+
+  # country (len(2) + country)
+  let clBytes = stream.readStr(2)
+  var clNet, cLen: uint16
+  copyMem(addr clNet, unsafeAddr clBytes[0], 2)
+  bigEndian16(addr cLen, addr clNet)
+  let country = stream.readStr(int(cLen))
 
   return PeerInfo(
     pubkey: pubkey,
     addresses: addresses,
     lastSeen: lsVal,
-    trustScore: trustScore
+    identityTrust: identityTrust,
+    reliabilityScore: reliabilityScore,
+    country: country
   )
 
 # ---------------------------------------------------------------------------
@@ -798,8 +950,8 @@ proc decodePeerList*(stream: Stream): PeerList =
 # F2F: WoT紹介メッセージ (TransTypeWoTIntro)
 # ---------------------------------------------------------------------------
 # WoTIntro 形式:
-#   introducerPubkey(33) | PeerInfo | signature(64)
-# 署名対象: introducerPubkey(33) | PeerInfo
+#   introducerPubkey(33) | PeerInfo | hopCount(1) | pathDecay(8) | expiresAt(8) | signature(64)
+# 署名対象: introducerPubkey(33) | PeerInfo | hopCount(1) | pathDecay(8) | expiresAt(8)
 
 proc encodeWoTIntroSignedData*(wi: WoTIntro): string =
   result = ""
@@ -810,6 +962,25 @@ proc encodeWoTIntroSignedData*(wi: WoTIntro): string =
 
   # newPeer (PeerInfo)
   result.add(encodePeerInfo(wi.newPeer))
+
+  # hopCount (1 バイト)
+  result.add(char(byte(wi.hopCount)))
+
+  # pathDecay (float64, ビッグエンディアン)
+  let pdF = wi.pathDecay
+  let pdBits = cast[uint64](pdF)
+  var pdNet: uint64
+  bigEndian64(addr pdNet, unsafeAddr pdBits)
+  var pdBytes: array[8, byte]
+  copyMem(addr pdBytes[0], addr pdNet, 8)
+  for b in pdBytes: result.add(char(b))
+
+  # expiresAt (uint64, ビッグエンディアン)
+  var eaNet: uint64
+  bigEndian64(addr eaNet, unsafeAddr wi.expiresAt)
+  var eaBytes: array[8, byte]
+  copyMem(addr eaBytes[0], addr eaNet, 8)
+  for b in eaBytes: result.add(char(b))
 
 proc encodeWoTIntro*(wi: WoTIntro): string =
   result = encodeWoTIntroSignedData(wi)
@@ -833,6 +1004,22 @@ proc decodeWoTIntro*(stream: Stream): WoTIntro =
   # newPeer (PeerInfo)
   let newPeer = decodePeerInfo(stream)
 
+  # hopCount (1 バイト)
+  let hopCount = byte(stream.readChar())
+
+  # pathDecay (float64, ビッグエンディアン)
+  let pdBytes = readExactStr(stream, 8)
+  var pdNet, pdBits: uint64
+  copyMem(addr pdNet, unsafeAddr pdBytes[0], 8)
+  bigEndian64(addr pdBits, addr pdNet)
+  let pathDecay = cast[float](pdBits)
+
+  # expiresAt (uint64, ビッグエンディアン)
+  let eaBytes = readExactStr(stream, 8)
+  var eaNet, eaVal: uint64
+  copyMem(addr eaNet, unsafeAddr eaBytes[0], 8)
+  bigEndian64(addr eaVal, addr eaNet)
+
   # signature (compact 形式 64 バイト)
   let sigBytes = stream.readStr(64)
   var sigArr: array[64, byte]
@@ -842,6 +1029,9 @@ proc decodeWoTIntro*(stream: Stream): WoTIntro =
   return WoTIntro(
     introducer: introducer,
     newPeer: newPeer,
+    hopCount: hopCount,
+    pathDecay: pathDecay,
+    expiresAt: eaVal,
     signature: signature
   )
 
@@ -849,8 +1039,8 @@ proc decodeWoTIntro*(stream: Stream): WoTIntro =
 # F2F: インビテーションコード (TransTypeInvitation)
 # ---------------------------------------------------------------------------
 # InvitationCode (エンコード前バイナリ形式):
-#   version(1) | issuerPubkey(33) | PeerInfo | expiresAt(8) | scope(1) | signature(64)
-# 署名対象: version(1) | issuerPubkey(33) | PeerInfo | expiresAt(8) | scope(1)
+#   version(1) | issuerPubkey(33) | PeerInfo | expiresAt(8) | scope(1) | invitationId(16) | usedAt(8) | signature(64)
+# 署名対象: version(1) | issuerPubkey(33) | PeerInfo | expiresAt(8) | scope(1) | invitationId(16) | usedAt(8)
 # Bech32エンコード後: f2finv1...
 
 proc encodeInvitationSignedData*(inv: InvitationCode): string =
@@ -875,6 +1065,16 @@ proc encodeInvitationSignedData*(inv: InvitationCode): string =
 
   # scope (1 バイト)
   result.add(char(byte(inv.scope)))
+
+  # invitationId (16 バイト)
+  for b in inv.invitationId: result.add(char(b))
+
+  # usedAt (uint64, ビッグエンディアン)
+  var uaNet: uint64
+  bigEndian64(addr uaNet, unsafeAddr inv.usedAt)
+  var uaBytes: array[8, byte]
+  copyMem(addr uaBytes[0], addr uaNet, 8)
+  for b in uaBytes: result.add(char(b))
 
 proc encodeInvitation*(inv: InvitationCode): string =
   result = encodeInvitationSignedData(inv)
@@ -910,6 +1110,17 @@ proc decodeInvitation*(stream: Stream): InvitationCode =
   # scope (1 バイト)
   let scope = byte(stream.readChar())
 
+  # invitationId (16 バイト)
+  let idBytes = readExactStr(stream, 16)
+  var invitationId: array[16, byte]
+  for i in 0..<16: invitationId[i] = byte(idBytes[i])
+
+  # usedAt (uint64, ビッグエンディアン)
+  let uaBytes = readExactStr(stream, 8)
+  var uaNet, uaVal: uint64
+  copyMem(addr uaNet, unsafeAddr uaBytes[0], 8)
+  bigEndian64(addr uaVal, addr uaNet)
+
   # signature (compact 形式 64 バイト)
   let sigBytes = stream.readStr(64)
   var sigArr: array[64, byte]
@@ -922,6 +1133,8 @@ proc decodeInvitation*(stream: Stream): InvitationCode =
     targetPeer: targetPeer,
     expiresAt: eaVal,
     scope: scope,
+    invitationId: invitationId,
+    usedAt: uaVal,
     signature: signature
   )
 
@@ -952,7 +1165,7 @@ proc decodeInvitationBech32*(code: string): InvitationCode =
 
 # インビテーションコード生成ヘルパー
 proc createInvitation*(issuerPriv: SkSecretKey, targetPeer: PeerInfo,
-                       expiresInSec: uint64, scope: uint8): InvitationCode =
+                        expiresInSec: uint64, scope: uint8): InvitationCode =
   let now = uint64(epochTime())
   var inv = InvitationCode(
     version: 1,
@@ -960,10 +1173,18 @@ proc createInvitation*(issuerPriv: SkSecretKey, targetPeer: PeerInfo,
     targetPeer: targetPeer,
     expiresAt: now + expiresInSec,
     scope: scope,
+    invitationId: "",  # プレースホルダ - 値はランダムに割り当てられる
+    usedAt: 0,       # 未使用
     signature: emptySignature()  # プレースホルダ
   )
   inv.signature = signInvitation(issuerPriv, inv)
   return inv
+
+# 暗号学的に安全なランダムバイト列生成 (nimcrypto の sysrand 利用)
+proc randomBytes*(n: int): seq[byte] =
+  result = newSeq[byte](n)
+  for i in 0..<n:
+    result[i] = byte(random.random(256))
 
 # ---------------------------------------------------------------------------
 # DHT (Kademlia over WebRTC) エンコード/デコード
@@ -1025,7 +1246,7 @@ proc encodeDhtSignedData*(m: DhtMessage): string =
   result.add(m.value)
 
 # DhtNodeInfo エンコード
-#   nodeId(32) | pubkey(33) | addrCount(1) | (addrLen(2) | addr)* | lastSeen(8) | trustScore(8)
+#   nodeId(32) | pubkey(33) | addrCount(1) | (addrLen(2) | addr)* | lastSeen(8) | identityTrust(8) | reliabilityScore(8)
 proc encodeDhtNodeInfo*(n: DhtNodeInfo): string =
   result = ""
   for b in n.nodeId: result.add(char(b))
@@ -1046,13 +1267,22 @@ proc encodeDhtNodeInfo*(n: DhtNodeInfo): string =
   var lsBytes: array[8, byte]
   copyMem(addr lsBytes[0], addr lsNet, 8)
   for b in lsBytes: result.add(char(b))
-  let tsF = n.trustScore
-  let tsBits = cast[uint64](tsF)
-  var tsNet: uint64
-  bigEndian64(addr tsNet, unsafeAddr tsBits)
-  var tsBytes: array[8, byte]
-  copyMem(addr tsBytes[0], addr tsNet, 8)
-  for b in tsBytes: result.add(char(b))
+  # identityTrust (float64, ビッグエンディアン)
+  let itF = n.identityTrust
+  let itBits = cast[uint64](itF)
+  var itNet: uint64
+  bigEndian64(addr itNet, unsafeAddr itBits)
+  var itBytes: array[8, byte]
+  copyMem(addr itBytes[0], addr itNet, 8)
+  for b in itBytes: result.add(char(b))
+  # reliabilityScore (float64, ビッグエンディアン)
+  let rsF = n.reliabilityScore
+  let rsBits = cast[uint64](rsF)
+  var rsNet: uint64
+  bigEndian64(addr rsNet, unsafeAddr rsBits)
+  var rsBytes: array[8, byte]
+  copyMem(addr rsBytes[0], addr rsNet, 8)
+  for b in rsBytes: result.add(char(b))
 
 # DhtNodeInfo デコード
 proc decodeDhtNodeInfo*(stream: Stream): DhtNodeInfo =
@@ -1079,18 +1309,27 @@ proc decodeDhtNodeInfo*(stream: Stream): DhtNodeInfo =
   copyMem(addr lsNet, unsafeAddr lsBytes[0], 8)
   bigEndian64(addr lastSeen, addr lsNet)
 
-  let tsBytes = readExactStr(stream, 8)
-  var tsNet, tsBits: uint64
-  copyMem(addr tsNet, unsafeAddr tsBytes[0], 8)
-  bigEndian64(addr tsBits, addr tsNet)
-  let trustScore = cast[float](tsBits)
+  # identityTrust (float64, ビッグエンディアン)
+  let itBytes = readExactStr(stream, 8)
+  var itNet, itBits: uint64
+  copyMem(addr itNet, unsafeAddr itBytes[0], 8)
+  bigEndian64(addr itBits, addr itNet)
+  let identityTrust = cast[float](itBits)
+
+  # reliabilityScore (float64, ビッグエンディアン)
+  let rsBytes = readExactStr(stream, 8)
+  var rsNet, rsBits: uint64
+  copyMem(addr rsNet, unsafeAddr rsBytes[0], 8)
+  bigEndian64(addr rsBits, addr rsNet)
+  let reliabilityScore = cast[float](rsBits)
 
   return DhtNodeInfo(
     nodeId: nodeId,
     pubkey: pubkey,
     addresses: addresses,
     lastSeen: lastSeen,
-    trustScore: trustScore
+    identityTrust: identityTrust,
+    reliabilityScore: reliabilityScore
   )
 
 # DHT メッセージをワイヤ形式にエンコードする (msgType は呼び出し側が付与):

@@ -42,21 +42,35 @@ v0.6 で削除されたもの: リレークライアント、ホスト昇格型�
   (`crypto.nim`)。
 - 受信側は署名を検証し、正当なピアからのものだけを採用。中間者攻撃やキャッシュ汚染を防止。
 
-### 3. 信頼スコア (trustScore) による質の管理
-- 各ピアに `0.0 ~ 1.0` のスコアを付与 (`f2f/wot.nim:decayTrustScores`)。
-- 接続成功で上昇、失敗/タイムアウトで低下。**最小値から開始** (新規はダイヤル対象外)。
-- WoT 紹介 (`MsgTypeWoTIntro(0x08/0x88)`) で紹介者の信頼を継承し、スコアが閾値
-  (connect threshold) に達した時点でダイヤルを許可。
-- 時間経過で減衰 (`f2f/wot.nim:decayTrustScores`)。
+### 3. 身元信頼とネットワーク信頼性
+- 各ピアに以下 2 つのスコアを付与 (`protocol.nim`)。
+  - **identityTrust** (0.0 ~ 1.0): 公開鍵による身元信頼度。新規は最小値から開始。
+  - **reliabilityScore** (0.0 ~ 1.0): ネットワーク接続実績・安定性。接続成功で上昇、失敗/タイムアウトで低下。
+- **2 スコア分離の利点**:
+  - identityTrust: 知人紹介や公開鍵基盤での信頼継承。Sybil耐性の基礎。
+  - reliabilityScore: 実際の接続品質と持続性。信頼スコアが閾値 (connect threshold) に達したピアのみダイヤル許可。
+- WoT 紹介 (`MsgTypeWoTIntro(0x08/0x88)`) で紹介者の identityTrust をベースに評価し、newPeer の initial reliabilityScore を決定。
+- 時間経過で reliabilityScore が減衰 (`f2f/wot.nim:decayTrustScores`)。identityTrust は変更されない。
+- connect threshold: reliabilityScore >= 0.0 で初めてダイヤル可能（デフォルト最小値）。
 
 ### 4. 最大 50 件のキャッシュ上限 (LRU + スコア順)
 - `peer_cache.nim` (ファイル) に永続化。`selectPeers` はスコア順で選択、古い物から LRU 削除。
 - 再起動時にキャッシュから即座に自動ダイヤル開始。
 
-### 5. WoT 紹介 (WoT Introduction)
+### 5. WoT 紹介 (WoT Introduction) with Distance Decay
 - 信頼できるピアから `MsgTypeWoTIntroPush` で新ピアを紹介 (`f2f/discovery.nim:processWoTIntroduction`)。
-  紹介者の trustScore をベースに評価し、知り合いの知り合いを
-  「紹介」として受け取れる。
+- 紹介 (`WoTIntro`):
+  - **introducer**: 紹介者の公開鍵
+  - **newPeer**: 紹介する新ピアの PeerInfo
+  - **signature**: 紹介者の署名 (introducer/newPeer 全体)
+  - **hopCount**: 紹介パスのホップ数 (1 バイト)
+  - **pathDecay**: 距離減衰係数 (float64, ビッグエンディアン)。ホップ数に応じて信頼が減衰。
+  - **expiresAt**: 有効期限 (uint64, ビッグエンディアン)。紹介はこのタイムスタント以降無効。
+- 距離減衰数学的モデル:
+  - 信頼伝播: `reliabilityScore = introducer.reliabilityScore * pathDecay ^ hopCount`
+  - pathDecay は 0.9 程度が推奨 (1 hop で 10% 減衰, 2 hop で 19% 減衰)。
+  - expiresAt (秒単位) で紹介の有効期限を設定。古い紹介は無視され、新しい紹介が採用される。
+- 受信側は hopCount と pathDecay を計算し、信頼閾値を下回る紹介は接続対象外とする。
 
 ### 6. Kademlia DHT によるピア発見と IP 解決
 - 256ビット ID (`nodeId = SHA-256(compressed pubkey)`)、k-buckets ルーティングテーブル
@@ -108,7 +122,8 @@ interface F2FPeerInfo {
   pubkey: string;        // 公開鍵 (HEX, 33 bytes compressed)
   addresses: string[];   // 接続アドレス (IPv6 一時アドレス [ipv6]:port 等)
   lastSeen: number;      // 最後に見た時刻 (Unix秒)
-  trustScore: number;    // WoT 信頼スコア (0.0 ~ 1.0, 新規は最小値)
+  identityTrust: number; // 身元信頼 (0.0 ~ 1.0): 公開鍵による信頼度
+  reliabilityScore: number; // ネットワーク信頼性 (0.0 ~ 1.0): 接続実績・安定性
   country?: string;      // GeoIP 国コード (ISO 3166-1 alpha-2), /64 プレフィクスから推定
 }
 ```
@@ -127,8 +142,11 @@ signature: FodprSignature(64)     # 紹介者の署名 (introducer/newPeer 全�
 
 ### 招待コード (InvitationCode) — `TransTypeInvitation (0x0B)` / `MsgTypeInvitationReq(0x09)` / `MsgTypeInvitationPush(0x89)`
 - Bech32: `f2finv1...` (`f2f/invitation.nim`)。
-- 構造: `version(1) | issuer(33) | targetPeer(PeerInfo) | expiresAt(8) | scope(1) | signature(64)`
+- 構造: `version(1) | issuer(33) | targetPeer(PeerInfo) | expiresAt(8) | scope(1) | invitationId(16) | usedAt(8) | signature(64)`
+  - `invitationId`: anti-reuse 用ランダム 16 バイト (1 回限り利用)
+  - `usedAt`: 使用時刻 (uint64)。同じ invitationId が 2 回使われると無効。
 - `scope`: 0 = 単発接続, 1 = WoT 招待 (キャッシュ共有含む)。
+- anti-reuse メカニズム: `usedAt` タイムスタンプを記録し、同じ invitationId が既に使用されている場合は拒否。
 
 ### DHT メッセージ — `MsgTypeDht (0x0B)` / `MsgTypeDhtNodes (0x8B)` / `MsgTypeDhtValue (0x8C)` (`f2f/dht.nim`)
 ```typescript
@@ -137,7 +155,7 @@ interface DhtMessage {
   msgId: Uint8Array;     // 16B ランダム ID (要求/応答対応)
   key: Uint8Array;       // 32B nodeId (FindNode/FindValue/Store)
   nodes: DhtNodeInfo[];  // FindNode 応答: 近傍ノード (最大 k=20)
-  value: Uint8Array;     // FindValue/Store のペイロード (例: "[ipv6]:port" レコード)
+  value: Uint8Array;     // FindValue/Store ペイロード (EndpointRecord: seq(8) + expiresAt(8) + signature(64) + [ipv6]:port)
   sender: Uint8Array;    // 33B compressed pubkey
   signature: Uint8Array; // 64B ECDSA
 }
@@ -146,10 +164,14 @@ interface DhtNodeInfo {
   pubkey: Uint8Array;    // 33B compressed
   addresses: string[];
   lastSeen: number;
-  trustScore: number;
+  identityTrust: number; // 身元信頼
+  reliabilityScore: number; // ネットワーク信頼性
 }
 ```
-- Node ID = `nodeId(pub) = SHA-256(compressed pubkey)` (256ビット)。XOR 距離で近傍を判定。
+- `value` ペイロード: `EndpointRecord` (シーケンス番号 + 有効期限 + 署名付き IP:ポート レコード)。
+- `STORE` で保存される値は `EndpointRecord` 形式で、送信者の署名により改ざん検知可能。
+- `FIND_VALUE` により公開鍵 → 有効な EndpointRecord (IP:ポート + 有効期限 + 署名) を解決。
+- replay protection: seq + expiresAt で同じ value の再保存を防止。
 
 ### FodprData (直接 P2P メッセージ) — `protocol.nim:FodprData`
 - `MsgTypeData (0x06)` で運ぶ。`TransTypeSigned / TransTypeEncrypted` 等の content 型を取る。
