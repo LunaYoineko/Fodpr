@@ -4,7 +4,7 @@
 ## 最大50件のピア情報をローカルストレージに保存し、
 ## 接続成功時に新しいピアリストで完全置換する。
 
-import os, json, streams, times, sequtils, algorithm, sets
+import os, json, streams, times, sequtils, algorithm, sets, options
 import protocol, crypto
 
 # シンプルな乱数生成 (secp256k1 との競合回避)
@@ -17,7 +17,7 @@ const
   MAX_CACHE_SIZE* = 50
   CACHE_VERSION* = 1
   CACHE_FILE_NAME = "peer_cache.json"
-  DEFAULT_TRUST_SCORE = 0.5
+  DEFAULT_TRUST_SCORE = 0.0  # 新規ピアの初期スコア (信頼は接続実績で築く)
   TRUST_INCREMENT = 0.1
   TRUST_DECREMENT = 0.15
   MIN_TRUST_SCORE = 0.05
@@ -54,7 +54,8 @@ proc peerInfoToJson(p: PeerInfo): JsonNode =
     "pubkey": fpubEncode(p.pubkey),
     "addresses": p.addresses.mapIt(%* it),
     "lastSeen": %* p.lastSeen,
-    "trustScore": %* p.trustScore
+    "identityTrust": %* p.identityTrust,
+    "reliabilityScore": %* p.reliabilityScore
   }
 
 proc jsonToPeerInfo(node: JsonNode): PeerInfo =
@@ -62,12 +63,22 @@ proc jsonToPeerInfo(node: JsonNode): PeerInfo =
     pubkey = fpubDecode(node["pubkey"].getStr())
     addresses = node["addresses"].mapIt(it.getStr())
     lastSeen = node["lastSeen"].getBiggestInt()
-    trustScore = node["trustScore"].getFloat()
+    reliability = if node.hasKey("reliabilityScore"):
+      node["reliabilityScore"].getFloat()
+    elif node.hasKey("trustScore"):
+      node["trustScore"].getFloat()
+    else:
+      DEFAULT_TRUST_SCORE
+    identityTrust = if node.hasKey("identityTrust"):
+      node["identityTrust"].getFloat()
+    else:
+      0.0
   return PeerInfo(
     pubkey: pubkey,
     addresses: addresses,
     lastSeen: uint64(lastSeen),
-    trustScore: trustScore
+    identityTrust: identityTrust,
+    reliabilityScore: reliability
   )
 
 # ---------------------------------------------------------------------------
@@ -131,7 +142,7 @@ proc selectPeers*(cache: PeerCache, count: int = 5): seq[PeerInfo] =
   var selections = newSeq[PeerSelection]()
   for p in freshPeers:
     let randFactor = 0.5 + (simpleRandom(1000).float / 1000.0) * 0.5  # 0.5-1.0
-    selections.add(PeerSelection(peer: p, score: p.trustScore * randFactor))
+    selections.add(PeerSelection(peer: p, score: p.reliabilityScore * randFactor))
 
   # スコア降順でソート
   selections.sort(proc(a, b: PeerSelection): int =
@@ -172,7 +183,7 @@ proc onConnectionSuccess*(cache: PeerCache, peerPubkey: SkPublicKey): PeerCache 
   var updated = cache
   for i, p in updated.peers:
     if p.pubkey == peerPubkey:
-      updated.peers[i].trustScore = min(p.trustScore + TRUST_INCREMENT, MAX_TRUST_SCORE)
+      updated.peers[i].reliabilityScore = min(p.reliabilityScore + TRUST_INCREMENT, MAX_TRUST_SCORE)
       updated.peers[i].lastSeen = uint64(epochTime())
       break
   updated.lastUpdated = uint64(epochTime())
@@ -183,10 +194,10 @@ proc onConnectionFailure*(cache: PeerCache, peerPubkey: SkPublicKey): PeerCache 
   var updated = cache
   for i, p in updated.peers:
     if p.pubkey == peerPubkey:
-      updated.peers[i].trustScore = max(p.trustScore - TRUST_DECREMENT, MIN_TRUST_SCORE)
+      updated.peers[i].reliabilityScore = max(p.reliabilityScore - TRUST_DECREMENT, MIN_TRUST_SCORE)
       break
   # 信頼スコアが閾値未満なら削除
-  updated.peers = updated.peers.filterIt(it.trustScore >= MIN_TRUST_SCORE)
+  updated.peers = updated.peers.filterIt(it.reliabilityScore >= MIN_TRUST_SCORE)
   updated.lastUpdated = uint64(epochTime())
   return updated
 
@@ -236,14 +247,14 @@ proc getActivePeerCount*(cache: PeerCache): int =
   return count
 
 # アクティブ接続上限チェック: 上限を超えていれば信頼の低いピアを切断候補とする
-proc getLowestActivePeer*(cache: PeerCache): option[PeerInfo] =
+proc getLowestActivePeer*(cache: PeerCache): Option[PeerInfo] =
   let now = uint64(epochTime())
-  var lowest: option[PeerInfo] = none()
+  var lowest: Option[PeerInfo] = none(PeerInfo)
   var lowestScore = 1.0
   for p in cache.peers:
     if now - p.lastSeen < STALE_THRESHOLD_SEC:
-      if p.trustScore < lowestScore:
-        lowestScore = p.trustScore
+      if p.reliabilityScore < lowestScore:
+        lowestScore = p.reliabilityScore
         lowest = some(p)
   return lowest
 
@@ -263,7 +274,7 @@ proc checkActivePeerLimit*(cache: PeerCache): PeerCache =
   if disconnected.isSome:
     var updated = cache
     # キャッシュから削除 (LRU的動作)
-    updated.peers = updated.peers.filterIt(it.pubkey != disconnected.value.pubkey)
+    updated.peers = updated.peers.filterIt(it.pubkey != disconnected.get().pubkey)
     updated.lastUpdated = uint64(epochTime())
     echo "Active peer limit (MAX_ACTIVE_PEERS=$MAX_ACTIVE_PEERS) exceeded, disconnected least-reliable peer"
     return updated

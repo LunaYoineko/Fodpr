@@ -133,7 +133,7 @@ proc newDhtNode*(
     minTrust: minTrust,
     pingSuccessCount: 0,
     pingFailureCount: 0,
-    currentPingInterval: MIN_PING_INTERVAL_MS,
+    currentPingInterval: cast[uint64](MIN_PING_INTERVAL_MS),
     lastPingTime: 0
   )
 
@@ -173,7 +173,7 @@ proc addNode*(
     return true
 
   # 新規ノード: WoT ゲート
-  if n.trustScore < minTrust:
+  if n.reliabilityScore < minTrust:
     return false
 
   if node.table.buckets[idx].nodes.len >= K_BUCKET_SIZE:
@@ -271,13 +271,12 @@ proc sendPing*(
   var now = uint64(epochTime())
   # Adaptive interval: only send if enough time has passed
   if node.lastPingTime > 0 and (now - node.lastPingTime) < node.currentPingInterval:
-    # not yet time for next PING - skip, return success (no-op)
-    return Promise(true)
+    return true
   
   var msg = DhtMessage(
     op: DhtOpPing,
     msgId: nextMsgId(node),
-    key: [0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    key: [0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     sender: node.localPubkey,
     signature: emptySignature()
   )
@@ -286,19 +285,16 @@ proc sendPing*(
   return result
 
 # PING失敗時のフォールバック呼び出し (handleDhtMessage 内から呼ばれる)
-proc onPingFailed*(node: var DhtNode) =
-  updatePingInterval(node, false)
-
 # PING間隔の適応的更新
-proc updatePingInterval*(node: var DhtNode, success: bool) {.async.} =
+proc updatePingInterval*(node: var DhtNode, success: bool) =
   if success:
     node.pingSuccessCount += 1
     node.pingFailureCount = 0
     # 連続成功: インターバルをわずかに減衰 (最小値へ)
     if node.pingSuccessCount >= PING_SUCCESS_THRESHOLD:
       node.currentPingInterval = max(
-        MIN_PING_INTERVAL_MS,
-        cast[uint64](cast[float](node.currentPingInterval) * PING_SUCCESS_DECREASE)
+        cast[uint64](MIN_PING_INTERVAL_MS),
+        cast[uint64](node.currentPingInterval.float * PING_SUCCESS_DECREASE)
       )
       node.pingSuccessCount = 0
   else:
@@ -307,10 +303,14 @@ proc updatePingInterval*(node: var DhtNode, success: bool) {.async.} =
     # 連続失敗: インターバルを増大 (最大値まで)
     if node.pingFailureCount >= PING_FAILURE_THRESHOLD:
       node.currentPingInterval = min(
-        MAX_PING_INTERVAL_MS,
-        cast[uint64](cast[float](node.currentPingInterval) * PING_FAILURE_INCREASE)
+        cast[uint64](MAX_PING_INTERVAL_MS),
+        cast[uint64](node.currentPingInterval.float * PING_FAILURE_INCREASE)
       )
       node.pingFailureCount = 0
+
+# PING失敗時のフォールバック呼び出し (handleDhtMessage 内から呼ばれる)
+proc onPingFailed*(node: var DhtNode) =
+  updatePingInterval(node, false)
 
 # FIND_NODE: ターゲットノードIDに近いノードを探索
 proc sendFindNode*(
@@ -381,7 +381,7 @@ proc handleDhtMessage*(
     pubkey: msg.sender,
     addresses: @[],
     lastSeen: uint64(epochTime()),
-    trustScore: node.minTrust
+    reliabilityScore: node.minTrust
   )
   discard addNode(node, peerNode, node.minTrust)
 
@@ -393,7 +393,7 @@ proc handleDhtMessage*(
       pubkey: node.localPubkey,
       addresses: @[],
       lastSeen: uint64(epochTime()),
-      trustScore: 1.0
+      reliabilityScore: 1.0
     )
     var pong = DhtMessage(
       op: DhtOpPong,

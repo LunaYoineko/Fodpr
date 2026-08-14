@@ -114,7 +114,7 @@ proc seedNodesToPeerInfo*(nodes: seq[SeedNode]): seq[PeerInfo] =
       pubkey: node.pubkey,
       addresses: node.addresses,
       lastSeen: now,
-      trustScore: 0.5  # シードから来たノードは中程度の信頼度
+      reliabilityScore: 0.0  # 新規ピアは常にスコア0.0から開始
     )
 
 # 空の PeerInfo を作成 (スタブ用)
@@ -127,7 +127,7 @@ proc emptyPeerInfo*(): PeerInfo =
     pubkey: dummyPub,
     addresses: @[],
     lastSeen: 0,
-    trustScore: 0.0
+    reliabilityScore: 0.0
   )
 
 # 空の WebRTCDataChannel を作成 (スタブ用)

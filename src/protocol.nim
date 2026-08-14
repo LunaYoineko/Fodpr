@@ -78,8 +78,11 @@ const
   TransTypeData*      = 7.uint16   # WebRTCデータチャネル専用。P2P直接通信で使用。
                                    # 各メッセージに署名を付与し、送信者の身元を保証する。
                                    # IPv6 一時アドレスなどのメタデータを含める。
+  TransTypeF2FSignal* = 8.uint16   # F2F: P2P直接シグナリング (リレー非依存)。
+                                   # WebRTC SDP/ICE を署名付きで P2P データチャネルに
+                                   # 直接送信する (seed/リレー経由の TransTypeWebRTC と分離)。
   TransTypePeerList*  = 9.uint16   # F2F: ピアリスト交換 (WoTキャッシュ同期) 専用。
-                                   # 最大50件のピア情報 (公開鍵、アドレス、lastSeen、trustScore) を
+                                   # 最大50件のピア情報 (公開鍵、アドレス、lastSeen、identityTrust、reliabilityScore) を
                                    # 署名付きで交換する。リレー非依存、P2P直接。
   TransTypeWoTIntro*  = 10.uint16  # F2F: WoT紹介メッセージ専用。
                                    # 新しいピアを信頼チェーン付きで紹介する。
@@ -240,6 +243,14 @@ proc signEndpointRecord*(priv: SkSecretKey, er: EndpointRecord): FodprSignature 
 proc verifyEndpointRecord*(er: EndpointRecord): bool =
   verifyBytes(er.pubkey, encodeEndpointRecordSignedData(er), er.signature)
 
+# 固定長フィールドを読み飛ばす。ストリームが短い場合は ValueError を投げる
+# (IndexDefect などの Defect を投げるとサーバーが落ちるため)。
+proc readExactStr(stream: Stream, len: int): string =
+  result = stream.readStr(len)
+  if result.len != len:
+    raise newException(ValueError,
+      "stream too short: expected " & $len & " bytes, got " & $result.len)
+
 proc decodeEndpointRecord*(stream: Stream): EndpointRecord =
   # pubkey (33 バイト)
   let pubBytes = readExactStr(stream, 33)
@@ -284,18 +295,17 @@ proc decodeEndpointRecord*(stream: Stream): EndpointRecord =
     signature: signature
   )
 
-proc verifyEndpointRecord*(er: EndpointRecord): bool =
-  verifyBytes(er.pubkey, encodeEndpointRecordSignedData(er), er.signature)
-
+# ---------------------------------------------------------------------------
 # DHT: 近傍ノード情報 (Kademlia ルーティングテーブル / 応答用)
 # nodeId = SHA-256(圧縮公開鍵) をノードIDとして使う。
-DhtNodeInfo* = object
-  nodeId*        : array[32, byte]  # SHA-256(compressed pubkey)
-  pubkey*        : SkPublicKey      # 公開鍵 (圧縮形式 33 バイト)
-  addresses*     : seq[string]      # 接続アドレス ["[ipv6]:port", ...]
-  lastSeen*      : uint64           # 最後に見た時刻 (Unix秒)
-  identityTrust* : float            # 身元信頼 (0.0-1.0)
-  reliabilityScore*: float          # ネットワーク信頼性 (0.0-1.0)
+type
+  DhtNodeInfo* = object
+    nodeId*        : array[32, byte]  # SHA-256(compressed pubkey)
+    pubkey*        : SkPublicKey      # 公開鍵 (圧縮形式 33 バイト)
+    addresses*     : seq[string]      # 接続アドレス ["[ipv6]:port", ...]
+    lastSeen*      : uint64           # 最後に見た時刻 (Unix秒)
+    identityTrust* : float            # 身元信頼 (0.0-1.0)
+    reliabilityScore*: float          # ネットワーク信頼性 (0.0-1.0)
 
   # DHT: RPC メッセージ (Kademlia over WebRTC データチャネル)。
   # MsgTypeDht (0x0B) / MsgTypeDhtNodes (0x8B) / MsgTypeDhtValue (0x8C) の
@@ -534,14 +544,6 @@ proc signSignal*(priv: SkSecretKey, s: FodprSignal): FodprSignature =
 proc verifySignal*(s: FodprSignal): bool =
   verifyBytes(s.sender, encodeSignalSignedData(s), s.signature)
 
-# 固定長フィールドを読み飛ばす。ストリームが短い場合は ValueError を投げる
-# (IndexDefect などの Defect を投げるとサーバーが落ちるため)。
-proc readExactStr(stream: Stream, len: int): string =
-  result = stream.readStr(len)
-  if result.len != len:
-    raise newException(ValueError,
-      "stream too short: expected " & $len & " bytes, got " & $result.len)
-
 # ストリームからシグナリングメッセージ本体を復元する (署名対象 + signature)。
 # msgType バイトは呼び出し側が読み飛ばしてから渡すこと。
 proc decodeSignal*(stream: Stream): FodprSignal =
@@ -591,6 +593,7 @@ proc transTypeName*(transType: uint16): string =
   of TransTypeSigned: "Signed"
   of TransTypeEncrypted: "Encrypted"
   of TransTypeData:   "Data"
+  of TransTypeF2FSignal: "F2FSignal"
   of TransTypePeerList: "PeerList"
   of TransTypeWoTIntro: "WoTIntro"
   of TransTypeInvitation: "Invitation"
@@ -1078,7 +1081,7 @@ proc encodeInvitationSignedData*(inv: InvitationCode): string =
   copyMem(addr uaBytes[0], addr uaNet, 8)
   for b in uaBytes: result.add(char(b))
 
-proc encodeInvitation*(inv: InvitationCode): string =
+proc encodeInvitationBinary*(inv: InvitationCode): string =
   result = encodeInvitationSignedData(inv)
   # signature (compact 形式 64 バイト)
   let sigRaw = inv.signature.sig.toRaw()
@@ -1087,10 +1090,10 @@ proc encodeInvitation*(inv: InvitationCode): string =
 proc signInvitation*(priv: SkSecretKey, inv: InvitationCode): FodprSignature =
   signBytes(priv, encodeInvitationSignedData(inv))
 
-proc verifyInvitation*(inv: InvitationCode): bool =
+proc verifyInvitationSig*(inv: InvitationCode): bool =
   verifyBytes(inv.issuer, encodeInvitationSignedData(inv), inv.signature)
 
-proc decodeInvitation*(stream: Stream): InvitationCode =
+proc decodeInvitationBinary*(stream: Stream): InvitationCode =
   # version (1 バイト)
   let version = byte(stream.readChar())
 
@@ -1148,7 +1151,7 @@ const InvitationHrp* = "f2finv"
 
 proc encodeInvitationBech32*(inv: InvitationCode): string =
   # バイナリエンコード
-  let bin = encodeInvitation(inv)
+  let bin = encodeInvitationBinary(inv)
   # バイト列に変換
   var data = newSeq[byte](bin.len)
   for i in 0..<bin.len: data[i] = byte(bin[i])
@@ -1163,30 +1166,13 @@ proc decodeInvitationBech32*(code: string): InvitationCode =
   for i in 0..<data.len: bin[i] = char(data[i])
   # ストリームからデコード
   var strm = newStringStream(bin)
-  return decodeInvitation(strm)
-
-# インビテーションコード生成ヘルパー
-proc createInvitation*(issuerPriv: SkSecretKey, targetPeer: PeerInfo,
-                        expiresInSec: uint64, scope: uint8): InvitationCode =
-  let now = uint64(epochTime())
-  var inv = InvitationCode(
-    version: 1,
-    issuer: issuerPriv.toPublicKey(),
-    targetPeer: targetPeer,
-    expiresAt: now + expiresInSec,
-    scope: scope,
-    invitationId: "",  # プレースホルダ - 値はランダムに割り当てられる
-    usedAt: 0,       # 未使用
-    signature: emptySignature()  # プレースホルダ
-  )
-  inv.signature = signInvitation(issuerPriv, inv)
-  return inv
+  return decodeInvitationBinary(strm)
 
 # 暗号学的に安全なランダムバイト列生成 (nimcrypto の sysrand 利用)
 proc randomBytes*(n: int): seq[byte] =
   result = newSeq[byte](n)
   for i in 0..<n:
-    result[i] = byte(random.random(256))
+    result[i] = byte(rand(256))
 
 # ---------------------------------------------------------------------------
 # DHT (Kademlia over WebRTC) エンコード/デコード

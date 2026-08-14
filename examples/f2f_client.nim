@@ -34,7 +34,7 @@ proc main() {.async.} =
     echo "3. キャッシュから接続候補を選択..."
     let candidates = selectPeers(cache, 3)
     for i, p in candidates:
-      echo "   [", i, "] ", fpubEncode(p.pubkey), " (信頼度: ", p.trustScore, ", 最終接続: ", p.lastSeen.int64.fromUnix().format("HH:mm:ss"), ")"
+      echo "   [", i, "] ", fpubEncode(p.pubkey), " (信頼度: ", p.reliabilityScore, ", 最終接続: ", p.lastSeen.int64.fromUnix().format("HH:mm:ss"), ")"
   else:
     echo "3. キャッシュが空です。インビテーションまたはシードフォールバックが必要です。"
   echo ""
@@ -45,7 +45,8 @@ proc main() {.async.} =
     pubkey: myKey.publicKey,
     addresses: @["[2001:db8::1]:8000", "wss://example.com/ws"],
     lastSeen: uint64(epochTime()),
-    trustScore: 1.0
+    identityTrust: 1.0,
+    reliabilityScore: 1.0
   )
 
   let inv = invitation.createInvitation(myKey.privateKey, targetPeer, 3600, INVITATION_SCOPE_WOT)
@@ -92,7 +93,8 @@ proc main() {.async.} =
     pubkey: generateFodprKey().publicKey,
     addresses: @["[2001:db8::2]:8000"],
     lastSeen: uint64(epochTime()),
-    trustScore: 0.8
+    identityTrust: 0.8,
+    reliabilityScore: 0.8
   )
   let intro = discovery.createWoTIntroduction(myKey.privateKey, newPeer)
   let introValid = verifyWoTIntro(intro)

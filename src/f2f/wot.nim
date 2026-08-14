@@ -43,7 +43,7 @@ proc buildWoTFromCache*(cache: PeerCache): WoTGraph =
   # 全ピアをノードとして追加
   for p in cache.peers:
     graph.nodes.add(p.pubkey)
-    graph.trustScores[p.pubkey] = p.trustScore
+    graph.trustScores[p.pubkey] = p.reliabilityScore
 
   # 簡易的なエッジ構築: trustScore 上位同士を相互に信頼とみなす
   # より高度な実装では WoTIntro メッセージから構築
@@ -51,7 +51,7 @@ proc buildWoTFromCache*(cache: PeerCache): WoTGraph =
   # 簡易バブルソート (trustScore 降順)
   for i in 0..<sortedPeers.len:
     for j in i+1..<sortedPeers.len:
-      if sortedPeers[j].trustScore > sortedPeers[i].trustScore:
+      if sortedPeers[j].reliabilityScore > sortedPeers[i].reliabilityScore:
         swap(sortedPeers[i], sortedPeers[j])
 
   # 上位10件を相互接続 (クリーク形成)
@@ -63,12 +63,12 @@ proc buildWoTFromCache*(cache: PeerCache): WoTGraph =
       # 相互エッジ追加
       graph.edges.add(TrustEdge(
         fromPub: a.pubkey, to: b.pubkey,
-        score: min(a.trustScore, b.trustScore),
+        score: min(a.reliabilityScore, b.reliabilityScore),
         createdAt: min(a.lastSeen, b.lastSeen)
       ))
       graph.edges.add(TrustEdge(
         fromPub: b.pubkey, to: a.pubkey,
-        score: min(a.trustScore, b.trustScore),
+        score: min(a.reliabilityScore, b.reliabilityScore),
         createdAt: min(a.lastSeen, b.lastSeen)
       ))
 
@@ -95,7 +95,7 @@ proc addWoTIntroduction*(
   updated.edges.add(TrustEdge(
     fromPub: intro.introducer,
     to: intro.newPeer.pubkey,
-    score: intro.newPeer.trustScore,
+    score: intro.newPeer.reliabilityScore,
     createdAt: uint64(epochTime())
   ))
 
@@ -156,7 +156,7 @@ proc recommendPeersByTrust*(
   var scored = newSeq[tuple[peer: PeerInfo, score: float]]()
 
   for p in cache.peers:
-    var score = p.trustScore
+    var score = p.reliabilityScore
 
     # 経路上のピアならボーナス
     if path.isSome:

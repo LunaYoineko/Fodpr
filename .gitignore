@@ -9,3 +9,7 @@ nimbledeps
 /examples/protocol_demo
 /examples/fodpr_client
 /examples/f2f_client
+/examples/ipv6test
+/examples/ipv6test_arm64
+/examples/ipv6test_dbg
+/examples/ipv6test_arm64_dbg

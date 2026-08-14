@@ -5,7 +5,7 @@
 ## 生成・検証・エンコード/デコードする。
 ## Bech32形式: f2finv1...
 
-import times, streams, strutils
+import times, streams, strutils, random
 import protocol, crypto
 
 const
@@ -24,12 +24,16 @@ proc createInvitation*(issuerPriv: SkSecretKey, targetPeer: PeerInfo,
                        expiresInSec: uint64 = DEFAULT_EXPIRY_HOURS * 3600,
                        scope: uint8 = INVITATION_SCOPE_WOT): InvitationCode =
   let now = uint64(epochTime())
+  var invitationId: array[16, byte]
+  for i in 0..<16: invitationId[i] = byte(rand(256))
   var inv = InvitationCode(
     version: INVITATION_VERSION,
     issuer: issuerPriv.toPublicKey(),
     targetPeer: targetPeer,
     expiresAt: now + expiresInSec,
     scope: scope,
+    invitationId: invitationId,
+    usedAt: 0,
     signature: emptySignature()  # プレースホルダ
   )
   inv.signature = signInvitation(issuerPriv, inv)
@@ -37,7 +41,7 @@ proc createInvitation*(issuerPriv: SkSecretKey, targetPeer: PeerInfo,
 
 # Bech32エンコード (f2finv1...)
 proc encodeInvitation*(inv: InvitationCode): string =
-  let bin = protocol.encodeInvitation(inv)
+  let bin = protocol.encodeInvitationBinary(inv)
   var data = newSeq[byte](bin.len)
   for i in 0..<bin.len: data[i] = byte(bin[i])
   result = bech32Encode(InvitationHrp, data)
@@ -48,7 +52,7 @@ proc decodeInvitation*(code: string): InvitationCode =
   var bin = newString(data.len)
   for i in 0..<data.len: bin[i] = char(data[i])
   var strm = newStringStream(bin)
-  return decodeInvitation(strm)
+  return protocol.decodeInvitationBinary(strm)
 
 # インビテーションコード検証
 # - 署名検証
@@ -65,7 +69,7 @@ proc verifyInvitation*(inv: InvitationCode): bool =
   # Otherwise, drift zone or still valid - accept (drift could explain the apparent expiry)
   if inv.scope > INVITATION_SCOPE_WOT:
     return false
-  return protocol.verifyInvitation(inv)
+  return protocol.verifyInvitationSig(inv)
 
 # URIスキーム形式で出力 (fodpr://invite/f2finv1...)
 proc encodeInvitationUri*(inv: InvitationCode): string =
@@ -123,6 +127,6 @@ proc createTestInvitation*(priv: SkSecretKey, targetPubkey: SkPublicKey,
     pubkey: targetPubkey,
     addresses: addresses,
     lastSeen: uint64(epochTime()),
-    trustScore: 1.0
+    reliabilityScore: 1.0
   )
   return createInvitation(priv, peer)

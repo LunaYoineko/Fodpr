@@ -40,11 +40,11 @@ proc buildWoTGraph*(peerList: PeerList): seq[WoTNode] =
   # アドレス情報から接続関係を推測 (同じアドレスを持つ = 知り合い)
   # より高度な実装では WoTIntro メッセージを使う
   for i, p in peerList.peers:
-    # 簡易実装: trustScore が高い順に上位数件を「知り合い」とみなす
+    # 簡易実装: reliabilityScore が高い順に上位数件を「知り合い」とみなす
     var scored = newSeq[tuple[pubkey: SkPublicKey, score: float]]()
     for other in peerList.peers:
       if other.pubkey != p.pubkey:
-        scored.add((other.pubkey, other.trustScore))
+        scored.add((other.pubkey, other.reliabilityScore))
 
     # スコア降順でソート (簡易バブルソート)
     for i in 0..<scored.len:
@@ -155,17 +155,10 @@ proc processWoTIntroduction*(
     return (false, cache)
 
   # 新しいピアをキャッシュに追加
+  # (設計方針: WoT紹介は発見と来歴の記録のみ。reliabilityScore は変更しない)
   let updatedCache = addOrUpdatePeer(cache, intro.newPeer)
 
-  # 紹介者の信頼スコアも少し上げる
-  var finalCache = updatedCache
-  for i, p in finalCache.peers:
-    if p.pubkey == intro.introducer:
-      finalCache.peers[i].trustScore =
-        min(p.trustScore + 0.05, MAX_TRUST_SCORE)
-      break
-
-  return (true, finalCache)
+  return (true, updatedCache)
 
 # キャッシュから WoT ベースでピアを選択 (信頼の連鎖考慮)
 proc selectPeersWoT*(
