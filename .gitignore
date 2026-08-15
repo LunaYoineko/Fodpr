@@ -1,11 +1,29 @@
+# Nim (nimble)
 /nimble.paths
+/nimble.develop
+/nimbledeps
 /config.nims
-nimble.develop
-nimbledeps
-/data
-/src/crypto
-/src/protocol
+.nimcache/
+/nimcache/
+
+# ビルド成果物 (バイナリ・アーカイブ)
 /bin
+*.o
+*.so
+*.a
+*.dylib
+*.dll
+*.exe
+*.apk
+*.aab
+*.ipa
+*.app/
+*.syms
+
+# 実行時データ (ピアキャッシュ等)
+/data
+
+# examples/ のコンパイル済みバイナリ
 /examples/protocol_demo
 /examples/fodpr_client
 /examples/f2f_client
@@ -13,3 +31,30 @@ nimbledeps
 /examples/ipv6test_arm64
 /examples/ipv6test_dbg
 /examples/ipv6test_arm64_dbg
+/examples/chat_client
+
+# Android
+#   生成物 (build_apk.sh がテンプレートから再生成するため追跡しない)
+android/local.properties
+android/.gradle/
+android/out/
+android/app/build/
+android/app/build.gradle
+android/app/src/main/AndroidManifest.xml
+android/app/src/main/assets/
+android/app/src/main/jniLibs/
+android/app/src/main/res/values/strings.xml
+
+# iOS (Mac で生成される成果物)
+ios/out/
+ios/FodprChat.xcodeproj/
+
+# エディタ・OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 旧規約のディレクトリ (過去の C 実装)
+/src/crypto
+/src/protocol

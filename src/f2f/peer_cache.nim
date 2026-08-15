@@ -1,8 +1,9 @@
 ## peer_cache.nim
 ## F2F: ピアキャッシュ・ローテーション管理モジュール
 ##
-## 最大50件のピア情報をローカルストレージに保存し、
-## 接続成功時に新しいピアリストで完全置換する。
+## 最大50件のピア情報をローカルストレージに保存する。
+## キャッシュは破棄せず、新しく取得したピアリストは既存キャッシュへマージする。
+## reliabilityScore が閾値未満のまま長期間 (STALE_SCORE_SEC) 経過したピアのみ削除する。
 
 import os, json, streams, times, sequtils, algorithm, sets, options
 import protocol, crypto
@@ -22,6 +23,10 @@ const
   TRUST_DECREMENT = 0.15
   MIN_TRUST_SCORE = 0.05
   MAX_TRUST_SCORE = 1.0
+  # 削除判定: スコアがこの値以上に上がらなければ削除対象
+  STALE_SCORE_THRESHOLD = 0.1
+  # スコアが閾値未満のままこの秒数 (7日) 経過したピアはキャッシュから削除
+  STALE_SCORE_SEC* = 86400 * 7
   STALE_THRESHOLD_SEC* = 86400 * 7  # 7日間見られていなければ古いとみなす
   # アクティブ接続の上限 (同時接続数のハードリミット)
   MAX_ACTIVE_PEERS* = 15  # 同時接続ピア数の上限 (15-20推奨)
@@ -55,7 +60,8 @@ proc peerInfoToJson(p: PeerInfo): JsonNode =
     "addresses": p.addresses.mapIt(%* it),
     "lastSeen": %* p.lastSeen,
     "identityTrust": %* p.identityTrust,
-    "reliabilityScore": %* p.reliabilityScore
+    "reliabilityScore": %* p.reliabilityScore,
+    "zeroScoreSince": %* p.zeroScoreSince
   }
 
 proc jsonToPeerInfo(node: JsonNode): PeerInfo =
@@ -73,17 +79,37 @@ proc jsonToPeerInfo(node: JsonNode): PeerInfo =
       node["identityTrust"].getFloat()
     else:
       0.0
+    zeroScoreSince = if node.hasKey("zeroScoreSince"):
+      uint64(node["zeroScoreSince"].getBiggestInt())
+    else:
+      0'u64
   return PeerInfo(
     pubkey: pubkey,
     addresses: addresses,
     lastSeen: uint64(lastSeen),
     identityTrust: identityTrust,
-    reliabilityScore: reliability
+    reliabilityScore: reliability,
+    zeroScoreSince: zeroScoreSince
   )
 
 # ---------------------------------------------------------------------------
 # 公開 API
 # ---------------------------------------------------------------------------
+
+# addOrUpdatePeer の前方宣言 (updateCache から参照されるため)
+proc addOrUpdatePeer*(cache: PeerCache, newPeer: PeerInfo): PeerCache
+
+# 7日ルール: reliabilityScore が STALE_SCORE_THRESHOLD 未満のまま
+# STALE_SCORE_SEC (7日) 以上経過したピアをキャッシュから削除する
+proc pruneStalePeers*(cache: PeerCache): PeerCache =
+  let now = uint64(epochTime())
+  var updated = cache
+  updated.peers = updated.peers.filterIt(
+    it.reliabilityScore >= STALE_SCORE_THRESHOLD or
+    it.zeroScoreSince == 0 or
+    now - it.zeroScoreSince < STALE_SCORE_SEC
+  )
+  return updated
 
 # キャッシュをファイルから読み込む
 proc loadCache*(): PeerCache =
@@ -99,11 +125,14 @@ proc loadCache*(): PeerCache =
     var peers = newSeq[PeerInfo]()
     for peerNode in doc["peers"]:
       peers.add(jsonToPeerInfo(peerNode))
-    return PeerCache(
+    var loaded = PeerCache(
       version: uint64(version),
       peers: peers,
       lastUpdated: uint64(lastUpdated)
     )
+    # 7日ルール: スコアが閾値未満のまま長期間経過したピアを削除
+    loaded = pruneStalePeers(loaded)
+    return loaded
   except:
     # 破損したファイルは無視して空キャッシュを返す
     return PeerCache(version: CACHE_VERSION, peers: @[], lastUpdated: 0)
@@ -127,16 +156,9 @@ proc selectPeers*(cache: PeerCache, count: int = 5): seq[PeerInfo] =
   if cache.peers.len == 0:
     return @[]
 
-  # 古すぎるピア (STALE_THRESHOLD_SEC 以上見られていない) を除外
-  let now = uint64(epochTime())
-  var freshPeers = newSeq[PeerInfo]()
-  for p in cache.peers:
-    if now - p.lastSeen < STALE_THRESHOLD_SEC:
-      freshPeers.add(p)
-
-  if freshPeers.len == 0:
-    # 全て古い場合は信頼スコア順でフォールバック
-    freshPeers = cache.peers
+  # 古いピアは削除せず維持する (7日ルールでのみ削除)。
+  # ここではキャッシュ全体から選択する。
+  let freshPeers = cache.peers
 
   # 選択スコアを計算 (信頼スコア * ランダム係数)
   var selections = newSeq[PeerSelection]()
@@ -156,27 +178,20 @@ proc selectPeers*(cache: PeerCache, count: int = 5): seq[PeerInfo] =
   for i in 0..<min(count, selections.len):
     result.add(selections[i].peer)
 
-# 新しいピアリストでキャッシュを完全置換 (ローテーション)
+# 取得したピアリストを既存キャッシュへマージする (キャッシュは破棄しない)
 proc updateCache*(cache: PeerCache, newPeers: seq[PeerInfo]): PeerCache =
-  var updatedPeers = newPeers
+  var updated = cache
 
-  # 最大サイズに制限
-  if updatedPeers.len > MAX_CACHE_SIZE:
-    updatedPeers = updatedPeers[0..<MAX_CACHE_SIZE]
+  for newPeer in newPeers:
+    # 既存ピアは保持しつつ、情報を更新/追加
+    updated = addOrUpdatePeer(updated, newPeer)
 
-  # 重複除去 (pubkey で判定)
-  var seen = initSet[SkPublicKey]()
-  var deduped = newSeq[PeerInfo]()
-  for p in updatedPeers:
-    if p.pubkey notin seen:
-      seen.incl(p.pubkey)
-      deduped.add(p)
+  # 7日ルール: スコアが閾値未満のまま長期間経過したピアを削除
+  updated = pruneStalePeers(updated)
 
-  return PeerCache(
-    version: cache.version + 1,
-    peers: deduped,
-    lastUpdated: uint64(epochTime())
-  )
+  updated.version = cache.version + 1
+  updated.lastUpdated = uint64(epochTime())
+  return updated
 
 # 接続成功時の信頼スコア更新
 proc onConnectionSuccess*(cache: PeerCache, peerPubkey: SkPublicKey): PeerCache =
@@ -185,6 +200,9 @@ proc onConnectionSuccess*(cache: PeerCache, peerPubkey: SkPublicKey): PeerCache 
     if p.pubkey == peerPubkey:
       updated.peers[i].reliabilityScore = min(p.reliabilityScore + TRUST_INCREMENT, MAX_TRUST_SCORE)
       updated.peers[i].lastSeen = uint64(epochTime())
+      # スコアが閾値以上になったので 7日ルール用タイマーをリセット
+      if updated.peers[i].reliabilityScore >= STALE_SCORE_THRESHOLD:
+        updated.peers[i].zeroScoreSince = 0
       break
   updated.lastUpdated = uint64(epochTime())
   return updated
@@ -195,9 +213,16 @@ proc onConnectionFailure*(cache: PeerCache, peerPubkey: SkPublicKey): PeerCache 
   for i, p in updated.peers:
     if p.pubkey == peerPubkey:
       updated.peers[i].reliabilityScore = max(p.reliabilityScore - TRUST_DECREMENT, MIN_TRUST_SCORE)
+      # スコアが閾値未満になった時刻を記録 (7日ルール用)
+      if updated.peers[i].reliabilityScore < STALE_SCORE_THRESHOLD:
+        if updated.peers[i].zeroScoreSince == 0:
+          updated.peers[i].zeroScoreSince = uint64(epochTime())
+      else:
+        # 閾値以上ならタイマーをリセット
+        updated.peers[i].zeroScoreSince = 0
       break
-  # 信頼スコアが閾値未満なら削除
-  updated.peers = updated.peers.filterIt(it.reliabilityScore >= MIN_TRUST_SCORE)
+  # 即時削除は行わない。削除は 7日ルール (pruneStalePeers) のみ
+  updated = pruneStalePeers(updated)
   updated.lastUpdated = uint64(epochTime())
   return updated
 
@@ -207,13 +232,27 @@ proc addOrUpdatePeer*(cache: PeerCache, newPeer: PeerInfo): PeerCache =
   var found = false
   for i, p in updated.peers:
     if p.pubkey == newPeer.pubkey:
-      # 既存ピアの情報を更新
-      updated.peers[i] = newPeer
+      # 既存ピア: アドレスと lastSeen は新しい情報へ統合するが、
+      # スコア (reliabilityScore / zeroScoreSince) はローカル実績を維持する
+      var mergedAddrs = p.addresses
+      for a in newPeer.addresses:
+        if a notin mergedAddrs:
+          mergedAddrs.add(a)
+      updated.peers[i].addresses = mergedAddrs
+      if newPeer.lastSeen > p.lastSeen:
+        updated.peers[i].lastSeen = newPeer.lastSeen
+      if newPeer.country.len > 0:
+        updated.peers[i].country = newPeer.country
       found = true
       break
 
   if not found:
-    updated.peers.add(newPeer)
+    var peer = newPeer
+    # 新規ピアはスコア 0.0 から開始。7日ルール用タイマーを開始
+    peer.reliabilityScore = DEFAULT_TRUST_SCORE
+    if peer.zeroScoreSince == 0:
+      peer.zeroScoreSince = uint64(epochTime())
+    updated.peers.add(peer)
 
   # 最大サイズ制限 (古い順で削除)
   if updated.peers.len > MAX_CACHE_SIZE:
@@ -224,6 +263,7 @@ proc addOrUpdatePeer*(cache: PeerCache, newPeer: PeerInfo): PeerCache =
     )
     updated.peers.setLen(MAX_CACHE_SIZE)
 
+  updated = pruneStalePeers(updated)
   updated.lastUpdated = uint64(epochTime())
   return updated
 

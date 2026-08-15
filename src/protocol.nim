@@ -140,6 +140,7 @@ type
     signature*   : FodprSignature # 上記全フィールドの ECDSA 署名
 
   # F2F: ピア情報 (ピアキャッシュ・WoT・DHT 用)
+  # NOTE: zeroScoreSince はローカルキャッシュ管理専用。ワイヤ形式 (encodePeerInfo/decodePeerInfo) では送受信しない。
   PeerInfo* = object
     pubkey*          : SkPublicKey  # 公開鍵 (圧縮形式 33 バイト)
     addresses*       : seq[string]  # 接続アドレス (IPv6一時アドレス, WebSocket URL等)
@@ -147,6 +148,7 @@ type
     identityTrust*   : float        # 身元信頼 (0.0-1.0): この公開鍵が誰によって保証されているか
     reliabilityScore*: float        # ネットワーク信頼性 (0.0-1.0): 接続成功率 / uptime / latency
     country*         : string       # GeoIP 国コード (ISO 3166-1 alpha-2), /64 プレフィクスから推定
+    zeroScoreSince*  : uint64       # ローカル専用: reliabilityScore が閾値未満になった時刻 (0=未計測/健全)
 
   # F2F: ピアリスト交換 (TransTypePeerList 用)
   # 最大50件のピア情報を署名付きで交換 (WoTキャッシュ同期)

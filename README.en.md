@@ -55,10 +55,12 @@ sent and received through a **relay server**, a kind of relay station.
 
 - **F2F (Friend-to-Friend) / WoT (Web of Trust) P2P**
   - Peer discovery via trusted contacts, max 50 peers cached in `localStorage`
-  - Bootstrap via invitation code (`f2finv1...` Bech32) or relay seed (`bootstrap()`)
+  - Bootstrap via invitation code (`f2finv1...` Bech32) or seed node (`fpub1...@[ipv6]:port`)
   - On P2P connection, exchange **signed PeerList** (`TransTypePeerList` / `MsgTypePeerListPush`)
-    with each other, merge caches, and auto-dial new peers (up to 50 connections, relay-free)
-  - WoT introduction (`MsgTypeWoTIntroPush`) for trusted peer discovery with score inheritance
+    with each other and **merge** into the local cache (never wiped). Auto-dial new peers (up to 50 connections, relay-free)
+  - **Cache retention rule**: a peer is removed only if its `reliabilityScore` stays below 0.1
+    for 7 days (`pruneStalePeers`); scores/`zeroScoreSince` of known peers are preserved locally
+  - WoT introduction (`MsgTypeWoTIntroPush`) records discovery/provenance only (score is not affected)
   - Groups with host-guest star topology (`TransTypeGroup` persisted on relay); host failover on disconnect
 
 - **RtcGroup (Host-Promotion P2P)**
@@ -171,6 +173,25 @@ It demonstrates key-pair generation, creating and signing an event,
 encode → decode round-trip, signature verification, and REQ encode / decode —
 all offline.
 
+### 4. Build the mobile apps (Android / iOS)
+
+Build outputs (`build/`, `out/`, `.so`, `.apk`, `.ipa`, etc.) are excluded via
+`.gitignore`. Only source is tracked; each toolchain fetches its own dependencies.
+
+```bash
+# --- Android (Linux/macOS) ---
+bash android/setup_toolchain.sh   # once: fetches JDK / NDK / SDL2 into $HOME/fodpr-toolchain
+bash android/build_apk.sh         # builds libmain.so + libSDL2.so and produces an APK
+# Optional: APP_SRC=examples/chat_client.nim APP_PACKAGE=com.fodpr.chat APP_LABEL="Fodpr Chat" \
+#   bash android/build_apk.sh --install
+
+# --- iOS (macOS + Xcode, no developer account required) ---
+bash ios/setup_toolchain.sh       # once: fetches the SDL2 source
+bash ios/build.sh                 # produces FodprChat.app (ad-hoc signed) + FodprChat.ipa
+# Simulator: bash ios/build.sh --sim
+# Xcode debug install: bash ios/make_xcodeproj.sh  → see ios/README.md for details
+```
+
 ---
 
 ## Technical specification (for developers)
@@ -181,16 +202,26 @@ all offline.
 Fodpr/
 ├── Fodpr.nimble        # Nimble package definition (Library type)
 ├── src/
-│   ├── Fodpr.nim       # Library main module (re-exports protocol / crypto)
-│   ├── protocol.nim    # Wire protocol encode / decode
-│   └── crypto.nim      # Bech32 and secp256k1 (keygen, signing, verification)
+│   ├── Fodpr.nim       # Library main module (re-exports protocol / crypto / f2f/*)
+│   ├── protocol.nim    # Wire protocol: message types / TransType / DhtOp / data structures (PeerInfo, PeerList, WoTIntro, InvitationCode, DhtMessage, FodprData)
+│   ├── crypto.nim      # Bech32 and secp256k1 (keygen, signing, verification)
+│   ├── envelope.nim    # Per-recipient encrypted envelope (TransTypeEncrypted)
+│   └── f2f/            # F2F mesh implementation
+│       ├── dht.nim           # Kademlia routing table (256-bit ID, k-buckets, PING/FIND_NODE/FIND_VALUE/STORE)
+│       ├── wot.nim           # WoT graph (addWoTIntroduction / findTrustPath / recommendPeersByTrust / decayTrustScores)
+│       ├── discovery.nim     # WoT graph build, getNextCandidates, requestPeerList/sendPeerList, WoT introduction
+│       ├── peer_cache.nim    # Peer cache persistence (50, merge-without-wipe + 7-day rule), pruneStalePeers / selectPeers
+│       ├── invitation.nim    # Bech32 invitation code encode/decode/verify (f2finv1...)
+│       ├── signaling.nim     # F2F SDP offer/answer/candidate support
+│       ├── transport.nim     # WebRTC data channel send/receive, IPv6 prefix + IID generation
+│       └── bootstrap.nim     # Bootstrap from configured seed nodes
 ├── examples/
-│   ├── fodpr_client.nim    # Sample client that talks to the relay server
-│   └── protocol_demo.nim   # Sample using protocol.nim (no server needed)
+│   ├── protocol_demo.nim   # Sample using protocol.nim (no server needed)
+│   └── chat_client.nim     # F2F mesh chat client (Linux / Android)
 ├── LICENSES/           # Third-party library license information
 ├── README.md           # 日本語版 README
 ├── README.en.md        # English README
-└── data/               # LMDB database (used by the relay server, git-ignored)
+└── data/               # Local run-time data (peer cache etc., git-ignored)
 ```
 
 The relay server (FodprRelay) is maintained in a separate repository:
@@ -493,14 +524,19 @@ B disconnects → A (oldest guest) promoted → HOST_CHANGE → everyone reconne
 
 #### F2F (Friend-to-Friend) / WoT (Web of Trust) P2P
 
-- **Peer cache**: up to 50 `F2FPeerInfo` (pubkey, addresses, lastSeen, trustScore)
-  persisted in `localStorage.fodpr_f2f_peer_cache`
-- **Bootstrap**: invitation code (`f2finv1...` Bech32) or relay seed (`bootstrap()`)
+- **Peer cache**: up to 50 `F2FPeerInfo` (pubkey, addresses, lastSeen, identityTrust,
+  reliabilityScore, country; `zeroScoreSince` is a **local-only** field used for the 7-day
+  eviction rule and never serialized on the wire) persisted in `localStorage.fodpr_f2f_peer_cache`
+- **Bootstrap**: invitation code (`f2finv1...` Bech32) or seed node (`fpub1...@[ipv6]:port`)
 - **PeerList exchange**: on P2P connection, exchange `TransTypePeerList` (0x09) /
-  `MsgTypePeerListPush` (0x87) signed peer lists (max 50). Receiver merges cache
-  and auto-dials unconnected peers up to 50 connections
-- **WoT introduction**: `MsgTypeWoTIntroPush` (0x88) introduces new peers from
-  trusted contacts (trustScore inheritance)
+  `MsgTypePeerListPush` (0x87) signed peer lists (max 50). The receiver **merges** the list
+  into the existing cache (never wiped) and auto-dials unconnected peers up to 50 connections.
+  Local `reliabilityScore` / `zeroScoreSince` of known peers are preserved on merge.
+- **Cache eviction**: a peer is removed only when its `reliabilityScore` stays below the
+  threshold (0.1) for 7 days (`pruneStalePeers`). Peers that reached 0.1+ (i.e. have a
+  successful connection) keep their timer reset and are never evicted.
+- **WoT introduction**: `MsgTypeWoTIntroPush` (0x88) records discovery/provenance only;
+  it does not change the new peer's `reliabilityScore` (new peers always start at 0.0).
 - **Groups**: host-guest star topology (`TransTypeGroup` persisted on relay). Host failover (`group_host_changed`)
 
 ### Storage (server.nim in FodprRelay)

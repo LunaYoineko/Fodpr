@@ -48,10 +48,11 @@ Fodpr（ふぉどぷる）は、SNS のような「投稿」を、特定の会�
 - `FIND_VALUE` で公開鍵 → IPv6 アドレスを解決し直接ダイヤル。
 
 ### 3. WoT (Web of Trust) 信頼ゲート
-- 各ピアに `0.0 ~ 1.0` のスコア。新規/未検証ピアは **最小スコアから開始**。
+- 各ピアに `identityTrust` (身元) と `reliabilityScore` (接続実績) の 2 スコア (0.0 ~ 1.0)。新規/未検証ピアは **最小スコアから開始**。
 - スコアが **閾値 (デフォルト 0.0) に達したピアのみダイヤル**。
-- WoT 紹介 (`MsgTypeWoTIntroPush`) で紹介者の信頼を継承。
+- WoT 紹介 (`MsgTypeWoTIntroPush`) は発見と来歴の記録のみ。スコアは紹介では変化しない。
 - 接続成功で上昇、失敗で低下、時間経過で減衰 (`decayTrustScores`)。
+- **ピアキャッシュは破棄しない** — 取得した PeerList は既存キャッシュへマージ。削除は `reliabilityScore` が 0.1 未満のまま 7日経過したピアのみ (`pruneStalePeers`)。
 
 ### 4. ゴシップによるイベント同期
 - 署名済みイベントをメッシュ隣接へ `MsgTypeEvent(0x01)` でフラッシュ。
@@ -107,11 +108,11 @@ Fodpr（ふぉどぷる）は、SNS のような「投稿」を、特定の会�
 v0.5 までは「郵便局 (リレーサーバー) 経由」でしたが、v0.6 からは **「知り合いの家を訪ねて手紙を直接渡す」** イメージです。
 
 1. **最初の 1 人** と繋ぐ — 招待コード / 設定シードノード / ビルトインアンカーのいずれかで最初のピアと F2F 接続確立。
-2. **署名付き PeerList** を交換 — 相手の知り合い (最大 50 件) を教えてもらい、WoT スコア閾値を超える相手へ自動ダイヤル。
+2. **署名付き PeerList** を交換 — 相手の知り合い (最大 50 件) を教えてもらい、WoT スコア閾値を超える相手へ自動ダイヤル。取得リストは既存キャッシュへ**マージ (破棄しない)**。
 3. **メッシュ形成** — 最大 50 接続まで連鎖的に拡大。以降はリレーなしで直接通信。
 4. **DHT で IP 解決** — 公開鍵を鍵に `FIND_VALUE` を発行し、相手の IPv6 を解決して直接ダイヤル。
 5. **ゴシップで同期** — 署名済みイベントを隣接へフラッシュ (MAX_HOPS=2)。eventId で重複排除。
-6. **WoT で質維持** — 紹介で信頼を引き継ぎ、接続成功でスコア上昇、失敗で低下、時間で減衰。
+6. **WoT で質維持** — 紹介で信頼を引き継ぎ、接続成功でスコア上昇、失敗で低下、時間で減衰。キャッシュは破棄せず維持し、スコア 0.1 未満のまま 7日経過したピアのみ削除。
 
 ---
 
@@ -166,6 +167,25 @@ cp public/docs.html /var/www/fodpr/docs.html
 FODPR_STATIC_ROOT=/var/www/fodpr FODPR_API_PORT=8088 nohup node api/server.mjs > /tmp/fodpr-api.log 2>&1 &
 ```
 
+### 4. モバイルアプリ (Android / iOS) をビルドする
+
+生成物 (`build/`, `out/`, `.so`, `.apk`, `.ipa` 等) は `.gitignore` で除外済みです。
+ビルドに必要なのはソースのみで、依存は各ツールチェインが自動取得します。
+
+```bash
+# --- Android (Linux/macOS) ---
+bash android/setup_toolchain.sh   # 初回のみ: JDK / NDK / SDL2 を $HOME/fodpr-toolchain に取得
+bash android/build_apk.sh         # libmain.so + libSDL2.so をビルドし APK を生成
+# オプション: APP_SRC=examples/chat_client.nim APP_PACKAGE=com.fodpr.chat APP_LABEL="Fodpr Chat" \
+#   bash android/build_apk.sh --install
+
+# --- iOS (macOS + Xcode, 開発者アカウント不要) ---
+bash ios/setup_toolchain.sh       # 初回のみ: SDL2 ソースを取得
+bash ios/build.sh                 # FodprChat.app (ad-hoc 署名) + FodprChat.ipa を生成
+# シミュレータ: bash ios/build.sh --sim
+# Xcode デバッグインストール: bash ios/make_xcodeproj.sh  → 詳細は ios/README.md
+```
+
 ---
 
 ## ディレクトリ構成
@@ -182,7 +202,7 @@ Fodpr/
 │       ├── dht.nim           # Kademlia ルーティングテーブル (256bit ID, k-buckets, PING/FIND_NODE/FIND_VALUE/STORE)
 │       ├── wot.nim           # WoT グラフ (addWoTIntroduction / findTrustPath / recommendPeersByTrust / decayTrustScores)
 │       ├── discovery.nim     # WoT グラフ構築, getNextCandidates, requestPeerList/sendPeerList, WoT 紹介処理
-│       ├── peer_cache.nim    # ピアキャッシュ永続化 (50 件 LRU+スコア順), selectPeers
+│       ├── peer_cache.nim    # ピアキャッシュ永続化 (50件, 破棄なしマージ + 7日ルール), pruneStalePeers / selectPeers
 │       ├── invitation.nim    # Bech32 招待コード encode/decode/verify (f2finv1...)
 │       ├── signaling.nim     # F2F SDP offer/answer/candidate サポート
 │       ├── transport.nim     # WebRTC データチャネル send/receive, IPv6 プレフィックス + IID 生成
@@ -251,11 +271,15 @@ Fodpr/
 ### PeerInfo (ピア情報)
 ```nim
 PeerInfo = object
-  pubkey: SkPublicKey      # 公開鍵 (圧縮形式 33 バイト)
-  addresses: seq[string]   # 接続アドレス (IPv6 一時アドレス "[ipv6]:port" 等)
-  lastSeen: uint64         # 最後に見た時刻 (Unix秒)
-  trustScore: float        # 信頼スコア (0.0-1.0)
+  pubkey: SkPublicKey        # 公開鍵 (圧縮形式 33 バイト)
+  addresses: seq[string]     # 接続アドレス (IPv6 一時アドレス "[ipv6]:port" 等)
+  lastSeen: uint64           # 最後に見た時刻 (Unix秒)
+  identityTrust: float       # 身元信頼 (0.0-1.0): 取得元 (issuer) での信頼度
+  reliabilityScore: float    # ネットワーク信頼性 (0.0-1.0): 接続実績・安定性
+  country: string            # GeoIP 国コード (ISO 3166-1 alpha-2)
+  zeroScoreSince: uint64     # ローカル専用 (ワイヤ非公開): スコアが 0.1 未満になった時刻 (7日ルール用, 0=未計測/健全)
 ```
+`zeroScoreSince` はワイヤ形式 (`encodePeerInfo`) では送受信せず、ローカルキャッシュの 7日ルール削除判定にのみ使用する。
 
 ### PeerList (キャッシュ交換, TransTypePeerList)
 `version(8) | peerCount(2) | PeerInfo[] | signature(64)` — 最大 50 件。
@@ -294,3 +318,4 @@ MIT License (see LICENSES/)
 ## 更新履歴 (v0.6 主な変更)
 
 - **2026-08-12**: v0.6 "Mesh" リリース — リレー廃止、完全 P2P メッシュ化。Kademlia DHT over WebRTC、WoT 信頼ゲート、ゴシップ、招待コード/ビルトインアンカーブートストラップ、GeoIP 接続多様性、IPv6 インバウンド遮断対策ドキュメント化。
+- **2026-08-15**: ピアキャッシュ方針変更 — 取得 PeerList による完全置換を廃止し**破棄なしマージ**へ移行。既存ピアの `reliabilityScore`/`zeroScoreSince` をローカル実績として保持。削除は `reliabilityScore` が 0.1 未満のまま 7日経過したピアのみ (`pruneStalePeers`)。`PeerInfo.zeroScoreSince` はローカル専用でワイヤ形式には含めない。

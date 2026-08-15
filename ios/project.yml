@@ -1,0 +1,58 @@
+name: FodprChat
+options:
+  minimumXcodeGenVersion: "2.30.0"
+  deploymentTarget:
+    iOS: "13.0"
+  groupSortPosition: top
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+
+targets:
+  FodprChat:
+    type: application
+    platform: iOS
+    deploymentTarget: "13.0"
+    # ソースは Nim (examples/chat_client.nim)。エントリポイント (main) は
+    # libSDL2.a 内の SDL_uikit_main が提供するため、このターゲットに独自ソースはない。
+    sources: []
+    info:
+      path: FodprChat/Info.plist
+    preBuildScripts:
+      - name: Build Fodpr libs (Nim + SDL2)
+        script: |
+          bash "${SRCROOT}/../build.sh" --libs-only
+        basedOnDependencyAnalysis: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.fodpr.chat
+        PRODUCT_NAME: FodprChat
+        INFOPLIST_FILE: FodprChat/Info.plist
+        # SDL_uikit_main (main 提供) と Nim の SDL_main が相互参照するため全ロード
+        OTHER_LDFLAGS: -all_load
+        IPHONEOS_DEPLOYMENT_TARGET: "13.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_BITCODE: NO
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ""
+        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks"
+    dependencies:
+      - library: ../out/iphoneos/libfodpr.a
+      - library: ../out/iphoneos/libSDL2.a
+      - sdk: AVFoundation.framework
+      - sdk: AudioToolbox.framework
+      - sdk: CoreGraphics.framework
+      - sdk: CoreHaptics.framework
+      - sdk: CoreMotion.framework
+      - sdk: Foundation.framework
+      - sdk: GameController.framework
+      - sdk: Metal.framework
+      - sdk: OpenGLES.framework
+      - sdk: QuartzCore.framework
+      - sdk: UIKit.framework
+      - sdk: CoreAudio.framework
+      - sdk: CoreVideo.framework
+      - sdk: CoreBluetooth.framework
+      - sdk: Security.framework

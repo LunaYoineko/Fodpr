@@ -39,8 +39,8 @@ v0.6 で削除されたもの:
 
 WoT 紹介 (`MsgTypeWoTIntro(0x08/0x88)`) は**発信情報の記録のみ**。reliabilityScoreは紹介で決定されず、newPeerは常に0.0から開始し、接続実績（成功/失敗）と時間減衰 (`f2f/wot.nim:decayTrustScores`) で変動する。identityTrust は変更されない。connect threshold: reliabilityScore >= 0.0 で初めてダイヤル可能（デフォルト最小値）。
 
-## 4. 最大 50 件のキャッシュ上限 (LRU + スコア順)
-`peer_cache.nim` (ファイル) に永続化。`selectPeers` はスコア順で選択、古い物から LRU 削除。再起動時にキャッシュから即座に自動ダイヤル開始。
+## 4. 最大 50 件のキャッシュ (破棄なしマージ + 7日ルール)
+`peer_cache.nim` (ファイル) に永続化。キャッシュは**破棄しない**。取得した PeerList は既存キャッシュへ**マージ**し、既存ピアの `reliabilityScore` / `zeroScoreSince` はローカル実績を維持する。削除は **7日ルール** のみ: `reliabilityScore` が `STALE_SCORE_THRESHOLD (0.1)` 未満のまま `STALE_SCORE_SEC (7日)` 経過したピアを削除する (`pruneStalePeers`)。スコアが閾値以上 (接続実績あり) になればタイマーはリセットされ、7日経過しても削除されない。`selectPeers` はスコア順で選択。再起動時にキャッシュから即座に自動ダイヤル開始。
 
 ## 5. WoT 紹介 (WoT Introduction) with Distance Decay
 信頼できるピアから `MsgTypeWoTIntroPush` で新ピアを紹介 (`f2f/discovery.nim:processWoTIntroduction`)。
@@ -113,8 +113,10 @@ interface F2FPeerInfo {
   identityTrust: number; // 身元信頼 (0.0 ~ 1.0): 公開鍵による信頼度
   reliabilityScore: number; // ネットワーク信頼性 (0.0 ~ 1.0): 接続実績・安定性
   country?: string;      // GeoIP 国コード (ISO 3166-1 alpha-2), /64 プレフィクスから推定
+  zeroScoreSince?: number; // ローカル専用 (ワイヤ非公開): reliabilityScore が閾値(0.1)未満になった時刻 (0=未計測/健全)
 }
 ```
+`zeroScoreSince` はローカルキャッシュ管理専用フィールドで、`encodePeerInfo`/`decodePeerInfo` (ワイヤ形式) では送受信しない。7日ルールの削除判定にのみ使用する。
 
 ## PeerList (キャッシュ交換) — `TransTypePeerList (0x09)` / `MsgTypePeerListPush (0x87)`
 構造: `version(8) | peerCount(2) | PeerInfo[] | signature(64)` (署名領域は `envelope.nim` の SignedData で)
@@ -174,7 +176,7 @@ interface DhtNodeInfo {
 | `f2f/dht.nim` | Kademlia ルーティングテーブル (256ビット ID, k-buckets), PING/FIND_NODE/FIND_VALUE/STORE |
 | `f2f/wot.nim` | WoT グラフ (addWoTIntroduction / findTrustPath / recommendPeersByTrust / decayTrustScores) |
 | `f2f/discovery.nim` | WoT グラフ構築, getNextCandidates, requestPeerList/sendPeerList, WoT 紹介処理 |
-| `f2f/peer_cache.nim` | ピアキャッシュ永続化 (50 件 LRU+スコア順), selectPeers |
+| `f2f/peer_cache.nim` | ピアキャッシュ永続化 (50 件, 破棄なしマージ + 7日ルール), pruneStalePeers / selectPeers |
 | `f2f/invitation.nim` | Bech32 招待コード encode/decode/verify (`f2finv1...`) |
 | `f2f/signaling.nim` | F2F SDP offer/answer/candidate サポート |
 | `f2f/transport.nim` | WebRTC データチャネル send/receive, IPv6 プレフィックス + インターフェース ID 生成 |
@@ -214,6 +216,7 @@ interface DhtNodeInfo {
 
 - `src/protocol.nim` に F2F 拡張 (`TransTypeF2FSignal = 8`, `PeerInfo` with `identityTrust`/`reliabilityScore`, `InvitationCode` with `invitationId`/`usedAt`) を追加済み。
 - `src/f2f/peer_cache.nim`, `discovery.nim`, `bootstrap.nim`, `wot.nim`, `invitation.nim`, `dht.nim` は **コンパイル修正済** (`reliabilityScore` 基準, `Option`/`Thread` API, `createInvitation`/`encodeInvitation`/`verifyInvitation` を `f2f/invitation.nim` が公開 API とし `protocol.nim` のバイナリ版は `*Binary`/`*Sig` へリネーム)。既存 `TransTypeWebRTC(6)`/`MsgTypeSignal` は互換性維持。
+- **ピアキャッシュ方針を変更**: 取得 PeerList による完全置換 (`updateCache`) を廃止し、**破棄なしマージ**へ移行。既存ピアの `reliabilityScore`/`zeroScoreSince` はローカル実績として保持。削除は `reliabilityScore` が `0.1` 未満のまま 7日経過したピアのみ (`pruneStalePeers`, `PeerInfo.zeroScoreSince` はローカル専用でワイヤ形式には含めない)。
 
 参考実装 (IPv6 到達性のみを端末で検証する TUI ツール):
 
