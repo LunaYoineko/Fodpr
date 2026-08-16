@@ -9,8 +9,8 @@
 #   bash ios/make_xcodeproj.sh         # generates ios/FodprChat.xcodeproj
 #   open ios/FodprChat.xcodeproj       # set your Apple ID as "Personal Team", Run
 #
-# The Xcode project's pre-build phase runs `ios/build.sh --libs-only` to compile
-# libfodpr.a (Nim) + libSDL2.a, then links them into the app.
+# The Xcode project's pre-build phase (project.yml: "Build Libraries") compiles
+# libfodpr.a (Nim) + libSDL2.a, then the target links them into the app.
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

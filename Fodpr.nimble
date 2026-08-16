@@ -15,4 +15,6 @@ requires "nimSHA2"
 requires "ws"
 
 # ipv6test.nim (examples/) 用 TUI ライブラリ
-requires "illwill"
+  requires "illwill"
+  # sdl2 is required for examples/chat_client.nim (iOS / macOS / Linux builds)
+  requires "sdl2"

@@ -26,6 +26,9 @@ if [ ! -d "$SDL_SRC/include/SDL2" ]; then
   rm -rf "$SDL_SRC"
   mkdir -p "$SDL_SRC"
   tar xzf "$SDL_TARBALL" -C "$SDL_SRC" --strip-components=1
+  # SDL2 2.32.10+ flattened include/ (headers directly under include/).
+  # Create SDL2/ symlink so bindings and build.sh find <SDL2/SDL.h>
+  ln -sfn . "$SDL_SRC/include/SDL2"
 fi
 echo "[ok] SDL2 source: $SDL_SRC"
 

@@ -44,8 +44,11 @@ Xcode で:
 2. TARGET -> Signing & Capabilities で「Team: Apple ID (Personal Team)」を選択
 3. 実行先デバイスを選んで Run
 
-プリビルドフェーズで `bash ios/build.sh --libs-only` が自動実行され、
-`libfodpr.a` (Nim) と `libSDL2.a` をコンパイルしてリンクします。
+Xcode のプリビルドフェーズ (`Build Libraries`) が自動で以下を実行し、リンクします。
+- `nim c --os:ios` で `libfodpr.a` (Nim の `SDL_main` をエクスポート) を生成
+- SDL 公式 Xcode プロジェクトで `libSDL2.a` を生成 (`SDL_uikit_main` が `main` を提供)
+
+フォントはビルド後のスクリプトフェーズで `.app` 直下にコピーされます。
 
 ## シミュレータ (署名不要)
 

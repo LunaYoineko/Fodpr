@@ -1,58 +1,109 @@
 name: FodprChat
 options:
-  minimumXcodeGenVersion: "2.30.0"
+  bundleIdPrefix: com.fodpr.chat
   deploymentTarget:
     iOS: "13.0"
-  groupSortPosition: top
   createIntermediateGroups: true
-
-settings:
-  base:
-    SWIFT_VERSION: "5.0"
 
 targets:
   FodprChat:
     type: application
     platform: iOS
-    deploymentTarget: "13.0"
-    # ソースは Nim (examples/chat_client.nim)。エントリポイント (main) は
-    # libSDL2.a 内の SDL_uikit_main が提供するため、このターゲットに独自ソースはない。
-    sources: []
-    info:
-      path: FodprChat/Info.plist
-    preBuildScripts:
-      - name: Build Fodpr libs (Nim + SDL2)
-        script: |
-          bash "${SRCROOT}/../build.sh" --libs-only
-        basedOnDependencyAnalysis: false
+    sources:
+      - path: App/stub.c
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.fodpr.chat
         PRODUCT_NAME: FodprChat
+        PRODUCT_BUNDLE_IDENTIFIER: com.fodpr.chat
         INFOPLIST_FILE: FodprChat/Info.plist
-        # SDL_uikit_main (main 提供) と Nim の SDL_main が相互参照するため全ロード
-        OTHER_LDFLAGS: -all_load
+        GENERATE_INFOPLIST_FILE: "NO"
         IPHONEOS_DEPLOYMENT_TARGET: "13.0"
+        SDKROOT: iphoneos
+        SUPPORTED_PLATFORMS: iphoneos
         TARGETED_DEVICE_FAMILY: "1,2"
-        ENABLE_BITCODE: NO
+        ENABLE_BITCODE: "NO"
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: ""
-        LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/Frameworks"
-    dependencies:
-      - library: ../out/iphoneos/libfodpr.a
-      - library: ../out/iphoneos/libSDL2.a
-      - sdk: AVFoundation.framework
-      - sdk: AudioToolbox.framework
-      - sdk: CoreGraphics.framework
-      - sdk: CoreHaptics.framework
-      - sdk: CoreMotion.framework
-      - sdk: Foundation.framework
-      - sdk: GameController.framework
-      - sdk: Metal.framework
-      - sdk: OpenGLES.framework
-      - sdk: QuartzCore.framework
-      - sdk: UIKit.framework
-      - sdk: CoreAudio.framework
-      - sdk: CoreVideo.framework
-      - sdk: CoreBluetooth.framework
-      - sdk: Security.framework
+        LIBRARY_SEARCH_PATHS:
+          - $(inherited)
+          - "$(SRCROOT)/out/iphoneos"
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - "-all_load"
+          - "-lfodpr"
+          - "-lSDL2"
+          - "-framework AVFoundation"
+          - "-framework AudioToolbox"
+          - "-framework CoreGraphics"
+          - "-framework CoreHaptics"
+          - "-framework CoreMotion"
+          - "-framework Foundation"
+          - "-framework GameController"
+          - "-framework Metal"
+          - "-framework OpenGLES"
+          - "-framework QuartzCore"
+          - "-framework UIKit"
+          - "-framework CoreAudio"
+          - "-framework CoreVideo"
+          - "-framework CoreBluetooth"
+          - "-framework Security"
+    preBuildScripts:
+      - name: Build Libraries (Nim + SDL2)
+        shell: /bin/bash
+        script: |
+          set -euo pipefail
+          cd "$SRCROOT"
+          source env.sh
+          REPO="$(cd "$SRCROOT/.." && pwd)"
+          export PATH="$HOME/.nimble/bin:$HOME/.choosenim/toolchains/nim-2.2.10/bin:$PATH"
+
+          SDK=iphoneos
+          ARCH="${ARCHS%% *}"
+          SYSROOT="$(xcrun --sdk "$SDK" --show-sdk-path)"
+          MIN="$MIN_IOS"
+          MIN_FLAG="-mios-version-min=$MIN"
+          OUT="$SRCROOT/out/$SDK"
+          mkdir -p "$OUT"
+
+          echo "==> Nim -> libfodpr.a"
+          if ! nim c -d:release --os:ios --cpu:"$ARCH" --app:staticlib --cc:clang --threads:on \
+            --dynlibOverride:SDL2 \
+            --nimcache:"$OUT/nimcache" \
+            --path:"$REPO/src" \
+            --passC:"-arch $ARCH -isysroot $SYSROOT -I$SDL_SRC/include $MIN_FLAG -Wno-unused-command-line-argument" \
+            --out:"$OUT/libfodpr.a" \
+            "$REPO/examples/chat_client.nim" >"$OUT/nim.log" 2>&1; then
+            echo "ERROR: nim build failed:"
+            cat "$OUT/nim.log"
+            exit 1
+          fi
+          if [ ! -f "$OUT/libfodpr.a" ]; then
+            echo "ERROR: libfodpr.a was not produced"
+            exit 1
+          fi
+
+          echo "==> SDL2 -> libSDL2.a"
+          SDL_SYMROOT="$OUT/sdl-symroot"
+          if ! xcodebuild -quiet -project "$SDL_SRC/Xcode/SDL/SDL.xcodeproj" \
+            -target "Static Library-iOS" -configuration Release -sdk "$SDK" \
+            -arch "$ARCH" ONLY_ACTIVE_ARCH=YES \
+            SYMROOT="$SDL_SYMROOT" OBJROOT="$SDL_SYMROOT/obj" \
+            build >"$OUT/sdl.log" 2>&1; then
+            echo "ERROR: SDL2 build failed:"
+            tail -40 "$OUT/sdl.log"
+            exit 1
+          fi
+          SDL_LIB="$(find "$SDL_SYMROOT" -name "libSDL2.a" -path "*$SDK*" | head -1)"
+          if [ -z "$SDL_LIB" ] || [ ! -f "$SDL_LIB" ]; then
+            echo "ERROR: libSDL2.a not found under $SDL_SYMROOT"
+            exit 1
+          fi
+          cp "$SDL_LIB" "$OUT/libSDL2.a"
+
+          echo "==> Libraries ready: $OUT/libfodpr.a, $OUT/libSDL2.a"
+    postBuildScripts:
+      - name: Copy Fonts
+        shell: /bin/bash
+        script: |
+          set -euo pipefail
+          cp "$SRCROOT/../examples/assets/DroidSansFallbackFull.ttf" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/"
+          cp "$SRCROOT/../examples/assets/DejaVuSans.ttf" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/"

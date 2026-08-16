@@ -12,14 +12,22 @@
 ## ビルド (Linux):   nim c -d:release --threads:on examples/chat_client.nim
 ## 実行 (Linux):     ./chat_client [localPort]
 ## ビルド (Android): APP_SRC=examples/chat_client.nim bash android/build_apk.sh
+## ビルド (macOS):   bash macos/build.sh
+## 実行 (macOS):     ./examples/chat_client [localPort]
 ##
 ## 依存: sdl2 / fontrender (examples/ 内)
 
 import os, strutils, times, net, options, math
+when not defined(android):
+  import osproc
 import sdl2
 import Fodpr
 import fontrender
 import f2f/mesh
+
+when defined(macosx):
+  # ネイティブメニューバー (macos/fodpr_menu.m を clang でコンパイルしてリンク)
+  proc fodprInstallMenu() {.importc: "fodpr_install_menu", cdecl.}
 
 const
   APP_VERSION = "0.1.0"
@@ -258,6 +266,18 @@ proc getGlobalIpv6(): seq[string] =
         addAddr(formatIpv6(s))
     except CatchableError:
       discard
+  # macOS / iOS fallback: parse ifconfig for global IPv6
+  when defined(macosx):
+    let output = execCmdEx("ifconfig -a")
+    for line in output.output.splitLines():
+      if "inet6" in line and "scopeid" in line:
+        let f = line.splitWhitespace()
+        for j in 1 ..< f.len:
+          if f[j] == "inet6" and j + 1 < f.len:
+            let ipAddr = f[j + 1]
+            if not ipAddr.startsWith("fe80") and not ipAddr.startsWith("fd"):
+              addAddr(ipAddr)
+            break
   let via = getLocalIpv6ViaUdp()
   if via.len > 0:
     addAddr(via)
@@ -399,6 +419,10 @@ proc loadAppFont(): Font =
   if result.loaded: return result
   result = loadFontFromFile(exeDir / "assets" / FONT_ASSET)
   if result.loaded: return result
+  when defined(macosx):
+    # .app バンドル内 (FodprChat.app/Contents/Resources) のフォント
+    result = loadFontFromFile(getAppDir() / ".." / "Resources" / FONT_ASSET)
+    if result.loaded: return result
   result = loadFontFromFile("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf")
   if result.loaded: return result
   result = loadFontFromFile("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")
@@ -406,6 +430,15 @@ proc loadAppFont(): Font =
   result = loadFontFromFile("/system/fonts/NotoSansCJK-Regular.ttc")
   if result.loaded: return result
   result = loadFontFromFile("/system/fonts/DroidSansFallback.ttf")
+  when defined(macosx):
+    result = loadFontFromFile("/System/Library/Fonts/NotoSansCJKJP.bundle/Contents/Resources/NotoSansCJKJP.ttc")
+    if result.loaded: return result
+    result = loadFontFromFile("/System/Library/Fonts/NotoSansCJK.ttc")
+    if result.loaded: return result
+    result = loadFontFromFile("/System/Library/Fonts/AppleSDGothicNeo.ttcof")
+    if result.loaded: return result
+    result = loadFontFromFile("/System/Library/Fonts/STHeitiTC-Light.ttc")
+    if result.loaded: return result
 
 proc loadLatinFont(): Font =
   result = loadFontFromRw(rwFromFile(LATIN_FONT_ASSET, "rb"))
@@ -417,11 +450,21 @@ proc loadLatinFont(): Font =
   if result.loaded: return result
   result = loadFontFromFile(exeDir / "assets" / LATIN_FONT_ASSET)
   if result.loaded: return result
+  when defined(macosx):
+    # .app バンドル内 (FodprChat.app/Contents/Resources) のフォント
+    result = loadFontFromFile(getAppDir() / ".." / "Resources" / LATIN_FONT_ASSET)
+    if result.loaded: return result
   result = loadFontFromFile("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
   if result.loaded: return result
   result = loadFontFromFile("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf")
   if result.loaded: return result
   result = loadFontFromFile("/system/fonts/Roboto-Regular.ttf")
+  when defined(macosx):
+    result = loadFontFromFile("/System/Library/Fonts/Helvetica.ttc")
+    if result.loaded: return result
+    result = loadFontFromFile("/System/Library/Fonts/SFNS.ttf")
+    if result.loaded: return result
+    result = loadFontFromFile("/Library/Fonts/Arial.ttf")
 
 # ---------------------------------------------------------------------------
 # 描画ヘルパ
@@ -819,18 +862,37 @@ proc runApp() =
   # --- SDL 初期化 ---
   if sdl2.init(INIT_VIDEO) != SdlSuccess:
     quit(1)
-  let win = createWindow("Fodpr Chat",
-                         SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-                         1280, 760, 0)
+
+  when defined(ios):
+    # iOS: fullscreen window fills the screen regardless of size passed
+    let win = createWindow("Fodpr Chat",
+                           SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                           1280, 760,
+                           SDL_WINDOW_FULLSCREEN)
+  else:
+    # macOS / Linux: windowed mode at a sensible default size
+    let win = createWindow("Fodpr Chat",
+                           SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+                           1280, 760, 0)
   if win == nil:
     quit(1)
+  when defined(macosx):
+    # SDL の NSApplication 初期化後にネイティブメニューバーを設定
+    fodprInstallMenu()
   let ren = createRenderer(win, -1, 0)
   if ren == nil:
     quit(1)
 
+  # On HiDPI displays (iOS Retina, Mac Retina), the backing store is at
+  # pixel resolution, not point resolution. SDL_GL_GetDrawableSize returns
+  # the real pixel dimensions of the window's backing store.
   var w: cint
   var h: cint
-  getSize(win, w, h)
+  glGetDrawableSize(win, w, h)
+  if w <= 0 or h <= 0:
+    discard getRendererOutputSize(ren, addr w, addr h)
+  if w <= 0 or h <= 0:
+    getSize(win, w, h)
   if w <= 0 or h <= 0:
     w = 1280
     h = 760

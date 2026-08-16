@@ -20,6 +20,12 @@
 *.app/
 *.syms
 
+# macOS ビルド (build.sh の中間成果物)
+macos/build/
+examples/chat_client.exe
+examples/chat_client.exe_dir
+*.exe_dir
+
 # 実行時データ (ピアキャッシュ等)
 /data
 
@@ -47,7 +53,9 @@ android/app/src/main/res/values/strings.xml
 
 # iOS (Mac で生成される成果物)
 ios/out/
-ios/FodprChat.xcodeproj/
+# Xcode ユーザーデータ (開いたマシン毎に変わるため追跡しない)
+ios/FodprChat.xcodeproj/xcuserdata/
+xcuserdata/
 
 # エディタ・OS
 .vscode/
