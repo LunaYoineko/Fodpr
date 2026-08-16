@@ -11,6 +11,22 @@ targets:
     platform: iOS
     sources:
       - path: App/stub.c
+      # --- Nim ソース (閲覧・編集用。ビルドは preBuildScript が担当) ---
+      - path: ../src/Fodpr.nim
+        buildPhase: none
+      - path: ../src/protocol.nim
+        buildPhase: none
+      - path: ../src/crypto.nim
+        buildPhase: none
+      - path: ../src/envelope.nim
+        buildPhase: none
+      - path: ../src/f2f
+        buildPhase: none
+        type: group
+      - path: ../examples/chat_client.nim
+        buildPhase: none
+      - path: ../examples/fontrender.nim
+        buildPhase: none
     settings:
       base:
         PRODUCT_NAME: FodprChat

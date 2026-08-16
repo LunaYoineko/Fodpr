@@ -11,17 +11,60 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		1486AA5642A57A86ECE2C578 /* envelope.nim */ = {isa = PBXFileReference; path = envelope.nim; sourceTree = "<group>"; };
+		19A65E48B7FB4EEC7EF465F2 /* dht.nim */ = {isa = PBXFileReference; path = dht.nim; sourceTree = "<group>"; };
+		262E1DD80793B9ECBA331F92 /* transport.nim */ = {isa = PBXFileReference; path = transport.nim; sourceTree = "<group>"; };
+		268E249243DB461C65A7A7E6 /* chat_client.nim */ = {isa = PBXFileReference; path = chat_client.nim; sourceTree = "<group>"; };
+		4E975821EFB9215F89A2CBCF /* Fodpr.nim */ = {isa = PBXFileReference; path = Fodpr.nim; sourceTree = "<group>"; };
+		500017A78C254588499D058C /* signaling.nim */ = {isa = PBXFileReference; path = signaling.nim; sourceTree = "<group>"; };
+		5B80DA4302CB4B02CFA6FF15 /* peer_cache.nim */ = {isa = PBXFileReference; path = peer_cache.nim; sourceTree = "<group>"; };
 		62207A9C4D96200215D5BA85 /* FodprChat.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = FodprChat.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		64FA2FDFEC23BA46DB931319 /* fontrender.nim */ = {isa = PBXFileReference; path = fontrender.nim; sourceTree = "<group>"; };
+		728C593E13BC1202FD1E009B /* bootstrap.nim */ = {isa = PBXFileReference; path = bootstrap.nim; sourceTree = "<group>"; };
+		99F8F981D46627BF523B59F3 /* holepunch.nim */ = {isa = PBXFileReference; path = holepunch.nim; sourceTree = "<group>"; };
+		9EB04DEE3BBF29971096B159 /* discovery.nim */ = {isa = PBXFileReference; path = discovery.nim; sourceTree = "<group>"; };
+		B8754C4C3B31C8AF22E97183 /* protocol.nim */ = {isa = PBXFileReference; path = protocol.nim; sourceTree = "<group>"; };
+		C837AA3377DF6B0849774084 /* crypto.nim */ = {isa = PBXFileReference; path = crypto.nim; sourceTree = "<group>"; };
 		EA9CC60B40CA822F7BDF0427 /* stub.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = stub.c; sourceTree = "<group>"; };
+		EBB33A9B86410F4EEA459D29 /* mesh.nim */ = {isa = PBXFileReference; path = mesh.nim; sourceTree = "<group>"; };
+		F8217A1FA050E0EE7F158E1F /* wot.nim */ = {isa = PBXFileReference; path = wot.nim; sourceTree = "<group>"; };
+		FF7AC2C73C5CBE2D85C571A3 /* invitation.nim */ = {isa = PBXFileReference; path = invitation.nim; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
+		172864D511EEC642920A81D7 /* examples */ = {
+			isa = PBXGroup;
+			children = (
+				268E249243DB461C65A7A7E6 /* chat_client.nim */,
+				64FA2FDFEC23BA46DB931319 /* fontrender.nim */,
+			);
+			path = examples;
+			sourceTree = "<group>";
+		};
 		6196900D6A5D54D08F59EDD5 = {
 			isa = PBXGroup;
 			children = (
 				7A4F50C07CCD410F29920E9E /* App */,
+				F04D7B4CE59DC581D98EE19D /* Fodpr */,
 				CEA3F4EC729673EC990FC5C6 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		671E075B2B26F562444EC49F /* f2f */ = {
+			isa = PBXGroup;
+			children = (
+				728C593E13BC1202FD1E009B /* bootstrap.nim */,
+				19A65E48B7FB4EEC7EF465F2 /* dht.nim */,
+				9EB04DEE3BBF29971096B159 /* discovery.nim */,
+				99F8F981D46627BF523B59F3 /* holepunch.nim */,
+				FF7AC2C73C5CBE2D85C571A3 /* invitation.nim */,
+				EBB33A9B86410F4EEA459D29 /* mesh.nim */,
+				5B80DA4302CB4B02CFA6FF15 /* peer_cache.nim */,
+				500017A78C254588499D058C /* signaling.nim */,
+				262E1DD80793B9ECBA331F92 /* transport.nim */,
+				F8217A1FA050E0EE7F158E1F /* wot.nim */,
+			);
+			path = f2f;
 			sourceTree = "<group>";
 		};
 		7A4F50C07CCD410F29920E9E /* App */ = {
@@ -32,12 +75,34 @@
 			path = App;
 			sourceTree = "<group>";
 		};
+		86775827FBDC5F017B3D5E11 /* src */ = {
+			isa = PBXGroup;
+			children = (
+				C837AA3377DF6B0849774084 /* crypto.nim */,
+				1486AA5642A57A86ECE2C578 /* envelope.nim */,
+				4E975821EFB9215F89A2CBCF /* Fodpr.nim */,
+				B8754C4C3B31C8AF22E97183 /* protocol.nim */,
+				671E075B2B26F562444EC49F /* f2f */,
+			);
+			path = src;
+			sourceTree = "<group>";
+		};
 		CEA3F4EC729673EC990FC5C6 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				62207A9C4D96200215D5BA85 /* FodprChat.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		F04D7B4CE59DC581D98EE19D /* Fodpr */ = {
+			isa = PBXGroup;
+			children = (
+				172864D511EEC642920A81D7 /* examples */,
+				86775827FBDC5F017B3D5E11 /* src */,
+			);
+			name = Fodpr;
+			path = ..;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
