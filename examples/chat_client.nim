@@ -25,7 +25,7 @@ import Fodpr
 import fontrender
 import f2f/mesh
 
-when defined(macosx):
+when hostOS == "macosx":
   # ネイティブメニューバー (macos/fodpr_menu.m を clang でコンパイルしてリンク)
   proc fodprInstallMenu() {.importc: "fodpr_install_menu", cdecl.}
 
@@ -267,7 +267,7 @@ proc getGlobalIpv6(): seq[string] =
     except CatchableError:
       discard
   # macOS / iOS fallback: parse ifconfig for global IPv6
-  when defined(macosx):
+  when hostOS == "macosx":
     let output = execCmdEx("ifconfig -a")
     for line in output.output.splitLines():
       if "inet6" in line and "scopeid" in line:
@@ -419,7 +419,7 @@ proc loadAppFont(): Font =
   if result.loaded: return result
   result = loadFontFromFile(exeDir / "assets" / FONT_ASSET)
   if result.loaded: return result
-  when defined(macosx):
+  when hostOS == "macosx":
     # .app バンドル内 (FodprChat.app/Contents/Resources) のフォント
     result = loadFontFromFile(getAppDir() / ".." / "Resources" / FONT_ASSET)
     if result.loaded: return result
@@ -430,7 +430,7 @@ proc loadAppFont(): Font =
   result = loadFontFromFile("/system/fonts/NotoSansCJK-Regular.ttc")
   if result.loaded: return result
   result = loadFontFromFile("/system/fonts/DroidSansFallback.ttf")
-  when defined(macosx):
+  when hostOS == "macosx":
     result = loadFontFromFile("/System/Library/Fonts/NotoSansCJKJP.bundle/Contents/Resources/NotoSansCJKJP.ttc")
     if result.loaded: return result
     result = loadFontFromFile("/System/Library/Fonts/NotoSansCJK.ttc")
@@ -450,7 +450,7 @@ proc loadLatinFont(): Font =
   if result.loaded: return result
   result = loadFontFromFile(exeDir / "assets" / LATIN_FONT_ASSET)
   if result.loaded: return result
-  when defined(macosx):
+  when hostOS == "macosx":
     # .app バンドル内 (FodprChat.app/Contents/Resources) のフォント
     result = loadFontFromFile(getAppDir() / ".." / "Resources" / LATIN_FONT_ASSET)
     if result.loaded: return result
@@ -459,7 +459,7 @@ proc loadLatinFont(): Font =
   result = loadFontFromFile("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf")
   if result.loaded: return result
   result = loadFontFromFile("/system/fonts/Roboto-Regular.ttf")
-  when defined(macosx):
+  when hostOS == "macosx":
     result = loadFontFromFile("/System/Library/Fonts/Helvetica.ttc")
     if result.loaded: return result
     result = loadFontFromFile("/System/Library/Fonts/SFNS.ttf")
@@ -876,7 +876,7 @@ proc runApp() =
                            1280, 760, 0)
   if win == nil:
     quit(1)
-  when defined(macosx):
+  when hostOS == "macosx":
     # SDL の NSApplication 初期化後にネイティブメニューバーを設定
     fodprInstallMenu()
   let ren = createRenderer(win, -1, 0)

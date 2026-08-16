@@ -84,8 +84,10 @@ rm -rf "$APP_DIR"
 # 1. Nim -> libfodpr.a
 # ---------------------------------------------------------------------------
 log "1/4  Nim -> libfodpr.a (os:ios cpu:$ARCH sdk:$SDK) [src: $APP_SRC]"
+NIM_ARCH="$ARCH"
+if [ "$NIM_ARCH" = "x86_64" ]; then NIM_ARCH="amd64"; fi
 # --dynlibOverride:SDL2 で sdl2 バインディングの dynlib を静的リンクに切り替え
-nim c -d:release --os:ios --cpu:"$ARCH" --app:staticlib --cc:clang --threads:on \
+nim c -d:release --os:ios --cpu:"$NIM_ARCH" --app:staticlib --cc:clang --threads:on \
   --dynlibOverride:SDL2 \
   --path:"$REPO/src" \
   --passC:"-arch $ARCH -isysroot $SYSROOT -I$SDL_SRC/include $MIN_FLAG -Wno-unused-command-line-argument" \

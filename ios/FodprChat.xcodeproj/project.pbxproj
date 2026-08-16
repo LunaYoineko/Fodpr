@@ -177,7 +177,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/bash;
-			shellScript = "set -euo pipefail\ncd \"$SRCROOT\"\nsource env.sh\nREPO=\"$(cd \"$SRCROOT/..\" && pwd)\"\nexport PATH=\"$HOME/.nimble/bin:$HOME/.choosenim/toolchains/nim-2.2.10/bin:$PATH\"\n\nSDK=iphoneos\nARCH=\"${ARCHS%% *}\"\nSYSROOT=\"$(xcrun --sdk \"$SDK\" --show-sdk-path)\"\nMIN=\"$MIN_IOS\"\nMIN_FLAG=\"-mios-version-min=$MIN\"\nOUT=\"$SRCROOT/out/$SDK\"\nmkdir -p \"$OUT\"\n\necho \"==> Nim -> libfodpr.a\"\nif ! nim c -d:release --os:ios --cpu:\"$ARCH\" --app:staticlib --cc:clang --threads:on \\\n  --dynlibOverride:SDL2 \\\n  --nimcache:\"$OUT/nimcache\" \\\n  --path:\"$REPO/src\" \\\n  --passC:\"-arch $ARCH -isysroot $SYSROOT -I$SDL_SRC/include $MIN_FLAG -Wno-unused-command-line-argument\" \\\n  --out:\"$OUT/libfodpr.a\" \\\n  \"$REPO/examples/chat_client.nim\" >\"$OUT/nim.log\" 2>&1; then\n  echo \"ERROR: nim build failed:\"\n  cat \"$OUT/nim.log\"\n  exit 1\nfi\nif [ ! -f \"$OUT/libfodpr.a\" ]; then\n  echo \"ERROR: libfodpr.a was not produced\"\n  exit 1\nfi\n\necho \"==> SDL2 -> libSDL2.a\"\nSDL_SYMROOT=\"$OUT/sdl-symroot\"\nif ! xcodebuild -quiet -project \"$SDL_SRC/Xcode/SDL/SDL.xcodeproj\" \\\n  -target \"Static Library-iOS\" -configuration Release -sdk \"$SDK\" \\\n  -arch \"$ARCH\" ONLY_ACTIVE_ARCH=YES \\\n  SYMROOT=\"$SDL_SYMROOT\" OBJROOT=\"$SDL_SYMROOT/obj\" \\\n  build >\"$OUT/sdl.log\" 2>&1; then\n  echo \"ERROR: SDL2 build failed:\"\n  tail -40 \"$OUT/sdl.log\"\n  exit 1\nfi\nSDL_LIB=\"$(find \"$SDL_SYMROOT\" -name \"libSDL2.a\" -path \"*$SDK*\" | head -1)\"\nif [ -z \"$SDL_LIB\" ] || [ ! -f \"$SDL_LIB\" ]; then\n  echo \"ERROR: libSDL2.a not found under $SDL_SYMROOT\"\n  exit 1\nfi\ncp \"$SDL_LIB\" \"$OUT/libSDL2.a\"\n\necho \"==> Libraries ready: $OUT/libfodpr.a, $OUT/libSDL2.a\"\n";
+			shellScript = "set -euo pipefail\ncd \"$SRCROOT\"\nsource env.sh\nREPO=\"$(cd \"$SRCROOT/..\" && pwd)\"\nexport PATH=\"$HOME/.nimble/bin:$HOME/.choosenim/toolchains/nim-2.2.10/bin:$PATH\"\n\n# PLATFORM_NAME: iphoneos (実機) / iphonesimulator (シミュレータ)\nPLATFORM=\"$PLATFORM_NAME\"\nARCH=\"${ARCHS%% *}\"\nNIM_ARCH=\"$ARCH\"\nif [ \"$NIM_ARCH\" = \"x86_64\" ]; then NIM_ARCH=\"amd64\"; fi\nSYSROOT=\"$(xcrun --sdk \"$PLATFORM\" --show-sdk-path)\"\nMIN=\"$MIN_IOS\"\nif [ \"$PLATFORM\" = \"iphonesimulator\" ]; then\n  MIN_FLAG=\"-mios-simulator-version-min=$MIN\"\nelse\n  MIN_FLAG=\"-mios-version-min=$MIN\"\nfi\nOUT=\"$SRCROOT/out/$PLATFORM\"\nmkdir -p \"$OUT\"\n\necho \"==> Nim -> libfodpr.a ($PLATFORM/$ARCH)\"\nif ! nim c -d:release --os:ios --cpu:\"$NIM_ARCH\" --app:staticlib --cc:clang --threads:on \\\n  --dynlibOverride:SDL2 \\\n  --nimcache:\"$OUT/nimcache\" \\\n  --path:\"$REPO/src\" \\\n  --passC:\"-arch $ARCH -isysroot $SYSROOT -I$SDL_SRC/include $MIN_FLAG -Wno-unused-command-line-argument\" \\\n  --out:\"$OUT/libfodpr.a\" \\\n  \"$REPO/examples/chat_client.nim\" >\"$OUT/nim.log\" 2>&1; then\n  echo \"ERROR: nim build failed:\"\n  cat \"$OUT/nim.log\"\n  exit 1\nfi\nif [ ! -f \"$OUT/libfodpr.a\" ]; then\n  echo \"ERROR: libfodpr.a was not produced\"\n  exit 1\nfi\n\necho \"==> SDL2 -> libSDL2.a (prebuilt: $SDL_PREBUILT_DIR)\"\nSDL_PRE=\"$SDL_PREBUILT_DIR/$PLATFORM/libSDL2.a\"\nif [ ! -f \"$SDL_PRE\" ]; then\n  echo \"ERROR: prebuilt SDL2 not found: $SDL_PRE\"\n  echo \"Run once to build SDL2 for device + simulator:\"\n  echo \"  bash ios/setup_toolchain.sh\"\n  exit 1\nfi\ncp \"$SDL_PRE\" \"$OUT/libSDL2.a\"\n\necho \"==> Libraries ready: $OUT/libfodpr.a, $OUT/libSDL2.a\"\n";
 		};
 		C8CEF2B2532B081C82A57FEA /* Copy Fonts */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -227,7 +227,7 @@
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/out/iphoneos",
+					"$(SRCROOT)/out/$(PLATFORM_NAME)",
 				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -253,7 +253,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.fodpr.chat;
 				PRODUCT_NAME = FodprChat;
 				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
@@ -337,7 +337,7 @@
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
-					"$(SRCROOT)/out/iphoneos",
+					"$(SRCROOT)/out/$(PLATFORM_NAME)",
 				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",
@@ -363,7 +363,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.fodpr.chat;
 				PRODUCT_NAME = FodprChat;
 				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;

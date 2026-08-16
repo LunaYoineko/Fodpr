@@ -32,5 +32,42 @@ if [ ! -d "$SDL_SRC/include/SDL2" ]; then
 fi
 echo "[ok] SDL2 source: $SDL_SRC"
 
+# --- SDL2 事前ビルド (実機 + シミュレータ用の静的ライブラリ) ---
+# Xcode のスクリプトフェーズからネスト xcodebuild で SDL2 をビルドすると
+# シミュレータ向けビルドがクラッシュするため、ここで先にビルドしておく。
+build_sdl() {
+  local platform="$1" arch="$2"
+  local out="$SDL_PREBUILT_DIR/$platform/libSDL2.a"
+  if [ -f "$out" ]; then
+    echo "[skip] SDL2 ($platform/$arch) already built: $out"
+    return
+  fi
+  local symroot="$SDL_PREBUILT_DIR/.symroot/$platform"
+  echo "[build] SDL2 static lib ($platform/$arch)"
+  if ! xcodebuild -quiet -project "$SDL_SRC/Xcode/SDL/SDL.xcodeproj" \
+    -target "Static Library-iOS" -configuration Release -sdk "$platform" \
+    -arch "$arch" ONLY_ACTIVE_ARCH=YES \
+    SYMROOT="$symroot" OBJROOT="$symroot/obj" \
+    build; then
+    echo "ERROR: SDL2 build failed for $platform/$arch"
+    exit 1
+  fi
+  local lib="$(find "$symroot" -name "libSDL2.a" -path "*$platform*" | head -1)"
+  if [ -z "$lib" ] || [ ! -f "$lib" ]; then
+    echo "ERROR: libSDL2.a not found under $symroot"
+    exit 1
+  fi
+  mkdir -p "$(dirname "$out")"
+  cp "$lib" "$out"
+  echo "[ok] SDL2 ($platform/$arch): $out"
+}
+
+build_sdl iphoneos arm64
+if [ "$(uname -m)" = "arm64" ]; then
+  build_sdl iphonesimulator arm64
+else
+  build_sdl iphonesimulator x86_64
+fi
+
 echo
-echo "All done. Next: bash ios/build.sh"
+echo "All done. Next: bash ios/build.sh  (または ios/FodprChat.xcodeproj を Xcode で開いて Run)"

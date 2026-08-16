@@ -46,16 +46,35 @@ Xcode で:
 
 Xcode のプリビルドフェーズ (`Build Libraries`) が自動で以下を実行し、リンクします。
 - `nim c --os:ios` で `libfodpr.a` (Nim の `SDL_main` をエクスポート) を生成
-- SDL 公式 Xcode プロジェクトで `libSDL2.a` を生成 (`SDL_uikit_main` が `main` を提供)
+- `setup_toolchain.sh` が事前ビルドした `libSDL2.a` をプラットフォーム (実機/シミュレータ) に応じてコピー
 
 フォントはビルド後のスクリプトフェーズで `.app` 直下にコピーされます。
 
-## シミュレータ (署名不要)
+## シミュレータ
+
+実機と同じ Xcode プロジェクトをシミュレータ向けにもビルドできます。
 
 ```bash
-bash ios/build.sh --sim          # x86_64 or arm64 シミュレータ向け
-open ios/out/iphonesimulator/FodprChat.app
+bash ios/setup_toolchain.sh     # 初回のみ (SDL2 ソース + 実機/シミュレータ両方の libSDL2.a を事前ビルド)
+bash ios/make_xcodeproj.sh
+open ios/FodprChat.xcodeproj    # 実行先をシミュレータに切り替えて Run (署名不要)
 ```
+
+CLI からも実行できます (Intel Mac は x86_64、Apple Silicon は arm64 のシミュレータ):
+```bash
+xcodebuild -project ios/FodprChat.xcodeproj -scheme FodprChat \
+  -configuration Debug -sdk iphonesimulator \
+  -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+
+# 起動済みシミュレータへインストール・起動
+xcrun simctl boot "iPhone 16e"    # または任意のデバイス
+xcrun simctl install booted ~/Library/Developer/Xcode/DerivedData/FodprChat-*/Build/Products/Debug-iphonesimulator/FodprChat.app
+xcrun simctl launch booted com.fodpr.chat
+```
+
+> **注意**: iOS 26 シミュレータは非常にメモリを消費します。4GB RAM の Mac では
+> インストール・起動が完了しない場合があります (ビルド自体は成功します)。
+> シミュレータでの動作確認は 8GB 以上の RAM を推奨します。
 
 ## 環境変数 (ビルド設定)
 

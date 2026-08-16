@@ -34,14 +34,13 @@ targets:
         INFOPLIST_FILE: FodprChat/Info.plist
         GENERATE_INFOPLIST_FILE: "NO"
         IPHONEOS_DEPLOYMENT_TARGET: "13.0"
-        SDKROOT: iphoneos
-        SUPPORTED_PLATFORMS: iphoneos
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
         TARGETED_DEVICE_FAMILY: "1,2"
         ENABLE_BITCODE: "NO"
         CODE_SIGN_STYLE: Automatic
         LIBRARY_SEARCH_PATHS:
           - $(inherited)
-          - "$(SRCROOT)/out/iphoneos"
+          - "$(SRCROOT)/out/$(PLATFORM_NAME)"
         OTHER_LDFLAGS:
           - $(inherited)
           - "-all_load"
@@ -72,16 +71,23 @@ targets:
           REPO="$(cd "$SRCROOT/.." && pwd)"
           export PATH="$HOME/.nimble/bin:$HOME/.choosenim/toolchains/nim-2.2.10/bin:$PATH"
 
-          SDK=iphoneos
+          # PLATFORM_NAME: iphoneos (実機) / iphonesimulator (シミュレータ)
+          PLATFORM="$PLATFORM_NAME"
           ARCH="${ARCHS%% *}"
-          SYSROOT="$(xcrun --sdk "$SDK" --show-sdk-path)"
+          NIM_ARCH="$ARCH"
+          if [ "$NIM_ARCH" = "x86_64" ]; then NIM_ARCH="amd64"; fi
+          SYSROOT="$(xcrun --sdk "$PLATFORM" --show-sdk-path)"
           MIN="$MIN_IOS"
-          MIN_FLAG="-mios-version-min=$MIN"
-          OUT="$SRCROOT/out/$SDK"
+          if [ "$PLATFORM" = "iphonesimulator" ]; then
+            MIN_FLAG="-mios-simulator-version-min=$MIN"
+          else
+            MIN_FLAG="-mios-version-min=$MIN"
+          fi
+          OUT="$SRCROOT/out/$PLATFORM"
           mkdir -p "$OUT"
 
-          echo "==> Nim -> libfodpr.a"
-          if ! nim c -d:release --os:ios --cpu:"$ARCH" --app:staticlib --cc:clang --threads:on \
+          echo "==> Nim -> libfodpr.a ($PLATFORM/$ARCH)"
+          if ! nim c -d:release --os:ios --cpu:"$NIM_ARCH" --app:staticlib --cc:clang --threads:on \
             --dynlibOverride:SDL2 \
             --nimcache:"$OUT/nimcache" \
             --path:"$REPO/src" \
@@ -97,23 +103,15 @@ targets:
             exit 1
           fi
 
-          echo "==> SDL2 -> libSDL2.a"
-          SDL_SYMROOT="$OUT/sdl-symroot"
-          if ! xcodebuild -quiet -project "$SDL_SRC/Xcode/SDL/SDL.xcodeproj" \
-            -target "Static Library-iOS" -configuration Release -sdk "$SDK" \
-            -arch "$ARCH" ONLY_ACTIVE_ARCH=YES \
-            SYMROOT="$SDL_SYMROOT" OBJROOT="$SDL_SYMROOT/obj" \
-            build >"$OUT/sdl.log" 2>&1; then
-            echo "ERROR: SDL2 build failed:"
-            tail -40 "$OUT/sdl.log"
+          echo "==> SDL2 -> libSDL2.a (prebuilt: $SDL_PREBUILT_DIR)"
+          SDL_PRE="$SDL_PREBUILT_DIR/$PLATFORM/libSDL2.a"
+          if [ ! -f "$SDL_PRE" ]; then
+            echo "ERROR: prebuilt SDL2 not found: $SDL_PRE"
+            echo "Run once to build SDL2 for device + simulator:"
+            echo "  bash ios/setup_toolchain.sh"
             exit 1
           fi
-          SDL_LIB="$(find "$SDL_SYMROOT" -name "libSDL2.a" -path "*$SDK*" | head -1)"
-          if [ -z "$SDL_LIB" ] || [ ! -f "$SDL_LIB" ]; then
-            echo "ERROR: libSDL2.a not found under $SDL_SYMROOT"
-            exit 1
-          fi
-          cp "$SDL_LIB" "$OUT/libSDL2.a"
+          cp "$SDL_PRE" "$OUT/libSDL2.a"
 
           echo "==> Libraries ready: $OUT/libfodpr.a, $OUT/libSDL2.a"
     postBuildScripts:

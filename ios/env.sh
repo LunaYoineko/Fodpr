@@ -11,6 +11,11 @@ export SDL_RELEASE="2.32.10"
 export SDL_TARBALL="$DL_DIR/SDL2-$SDL_RELEASE.tar.gz"
 export SDL_URL="https://github.com/libsdl-org/SDL/releases/download/release-$SDL_RELEASE/SDL2-$SDL_RELEASE.tar.gz"
 
+# SDL2 事前ビルド成果物 (実機/シミュレータ向けの静的ライブラリ)
+# setup_toolchain.sh が生成する。Xcode のスクリプトフェーズ内でネスト xcodebuild を
+# 行うとシミュレータ向けビルドがクラッシュするため、ここからコピーするだけにする。
+export SDL_PREBUILT_DIR="$IOS_TOOLCHAIN_HOME/prebuilt"
+
 # 最低 iOS バージョン (A12 Bionic=iPhone XS 以降など)
 export MIN_IOS="${MIN_IOS:-13.0}"
 
